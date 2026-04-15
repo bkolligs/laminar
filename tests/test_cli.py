@@ -1,5 +1,6 @@
 import io
 import json
+import subprocess
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -896,6 +897,155 @@ def test_x_sources_default_to_paid(tmp_path: Path) -> None:
     assert sources[0].costs_money is True
 
 
+def test_x_list_sources_use_xurl_and_store_list_contents(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    list_url = "https://x.com/i/lists/9876543210"
+    expected_target = (
+        "/2/lists/9876543210/tweets"
+        "?expansions=author_id&max_results=100&tweet.fields=created_at&user.fields=username"
+    )
+
+    add_args = parser.parse_args(
+        [
+            "--db",
+            str(db_path),
+            "source",
+            "add",
+            "--kind",
+            "x",
+            "--label",
+            "AI List",
+            "--feed-url",
+            list_url,
+        ]
+    )
+    assert run(add_args) == 0
+
+    original_run = adapters.subprocess.run
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command == ["xurl", expected_target]
+        assert kwargs["check"] is True
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "items": [
+                        {
+                            "id": "12345",
+                            "text": "Short post on markets",
+                            "created_at": "2026-04-14T15:00:00Z",
+                            "user": {"screen_name": "example"},
+                        }
+                    ]
+                }
+            ),
+            stderr="",
+        )
+
+    adapters.subprocess.run = fake_run
+    try:
+        scan_args = parser.parse_args(
+            ["--db", str(db_path), "scan", "--include-paid"]
+        )
+        assert run(scan_args) == 0
+    finally:
+        adapters.subprocess.run = original_run
+
+    items = Repository(db_path).list_items(limit=10)
+    assert len(items) == 1
+    assert items[0].title == "Short post on markets"
+    assert items[0].canonical_url == "https://x.com/example/status/12345"
+
+
+def test_x_list_browser_url_is_translated_to_list_tweets_api_target() -> None:
+    target = adapters._x_command_target("https://x.com/i/lists/9876543210")
+
+    assert target == (
+        "/2/lists/9876543210/tweets"
+        "?expansions=author_id&max_results=100&tweet.fields=created_at&user.fields=username"
+    )
+
+
+def test_source_remove_deletes_source_without_items(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
+
+    with redirect_stdout(io.StringIO()) as buffer:
+        remove_args = parser.parse_args(["--db", str(db_path), "source", "remove", "blog-1"])
+        assert run(remove_args) == 0
+
+    assert "Removed source blog-1" in buffer.getvalue()
+    assert repo.list_sources() == []
+
+
+def test_source_remove_rejects_non_recursive_delete_when_items_exist(
+    tmp_path: Path, capsys
+) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="blog-1",
+            item_type="blog",
+            external_id="post-1",
+            canonical_url="https://example.com/post-1",
+            title="Post One",
+            author="Author",
+            published_at=datetime(2026, 4, 14, tzinfo=timezone.utc),
+            excerpt="One",
+            content_text="One",
+        )
+    )
+
+    remove_args = parser.parse_args(["--db", str(db_path), "source", "remove", "blog-1"])
+    assert run(remove_args) == 1
+
+    captured = capsys.readouterr()
+    assert "rerun with --recursive" in captured.err
+    assert [source.id for source in repo.list_sources()] == ["blog-1"]
+    assert len(repo.list_items(limit=10)) == 1
+
+
+def test_source_remove_recursive_deletes_source_and_items(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="blog-1",
+            item_type="blog",
+            external_id="post-1",
+            canonical_url="https://example.com/post-1",
+            title="Post One",
+            author="Author",
+            published_at=datetime(2026, 4, 14, tzinfo=timezone.utc),
+            excerpt="One",
+            content_text="One",
+        )
+    )
+
+    with redirect_stdout(io.StringIO()) as buffer:
+        remove_args = parser.parse_args(
+            ["--db", str(db_path), "source", "remove", "--recursive", "blog-1"]
+        )
+        assert run(remove_args) == 0
+
+    output = buffer.getvalue()
+    assert "Removed source blog-1 and deleted 1 items" in output
+    assert repo.list_sources() == []
+    assert repo.list_items(limit=10) == []
+
+
 def test_scan_and_query_atom_blog_feed(tmp_path: Path) -> None:
     atom_feed = tmp_path / "atom.xml"
     atom_feed.write_text(
@@ -976,6 +1126,59 @@ def test_items_show_accepts_exact_title(tmp_path: Path) -> None:
     assert shown["title"] == "Daily Briefing"
 
 
+def test_items_remove_accepts_exact_item_id(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_item(
+        NormalizedItem(
+            item_id="item-1",
+            source_id="yt-1",
+            item_type="video",
+            external_id="abc123",
+            canonical_url="https://youtube.com/watch?v=abc123",
+            title="Daily Briefing",
+            author="Channel",
+            published_at=None,
+            excerpt="Summary",
+            content_text="Transcript",
+        )
+    )
+
+    with redirect_stdout(io.StringIO()) as buffer:
+        remove_args = parser.parse_args(["--db", str(db_path), "items", "remove", "item-1"])
+        assert run(remove_args) == 0
+
+    assert "Removed item item-1" in buffer.getvalue()
+    assert repo.list_items(limit=10) == []
+
+
+def test_items_remove_accepts_exact_title(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_item(
+        NormalizedItem(
+            item_id="item-1",
+            source_id="yt-1",
+            item_type="video",
+            external_id="abc123",
+            canonical_url="https://youtube.com/watch?v=abc123",
+            title="Daily Briefing",
+            author="Channel",
+            published_at=None,
+            excerpt="Summary",
+            content_text="Transcript",
+        )
+    )
+
+    remove_args = parser.parse_args(
+        ["--db", str(db_path), "items", "remove", "Daily Briefing"]
+    )
+    assert run(remove_args) == 0
+    assert repo.list_items(limit=10) == []
+
+
 def test_items_show_accepts_unique_item_id_prefix(tmp_path: Path) -> None:
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
@@ -1041,6 +1244,17 @@ def test_items_show_rejects_ambiguous_item_id_prefix(tmp_path: Path, capsys) -> 
     assert "Item ID prefix 'aaaaaaa' is ambiguous" in captured.err
     assert "aaaaaaaa" in captured.err
     assert "aaaaaaab" in captured.err
+
+
+def test_items_remove_rejects_missing_item(tmp_path: Path, capsys) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+
+    remove_args = parser.parse_args(["--db", str(db_path), "items", "remove", "missing"])
+    assert run(remove_args) == 1
+
+    captured = capsys.readouterr()
+    assert "Item missing not found" in captured.err
 
 
 def test_items_show_rejects_ambiguous_title(tmp_path: Path, capsys) -> None:

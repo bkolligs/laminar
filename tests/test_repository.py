@@ -3,6 +3,8 @@ from pathlib import Path
 import sqlite3
 from uuid import UUID
 
+import pytest
+
 from laminar.models import NormalizedItem, SourceConfig
 from laminar.repository import Repository
 
@@ -145,6 +147,79 @@ def test_records_last_successful_scan_time(tmp_path: Path) -> None:
     repo.mark_source_scan_succeeded("blog-1", scanned_at)
 
     assert repo.last_successful_scan_at("blog-1") == scanned_at
+
+
+def test_remove_source_requires_recursive_when_items_exist(tmp_path: Path) -> None:
+    repo = Repository(tmp_path / "laminar.db")
+    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="blog-1",
+            item_type="blog",
+            external_id="post-1",
+            canonical_url="https://example.com/post-1",
+            title="Post One",
+            author="Author",
+            published_at=datetime(2026, 4, 14, tzinfo=timezone.utc),
+            excerpt="One",
+            content_text="One",
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="still has 1 items; rerun with --recursive",
+    ):
+        repo.remove_source("blog-1")
+
+
+def test_remove_source_recursive_deletes_source_items_and_scans(tmp_path: Path) -> None:
+    repo = Repository(tmp_path / "laminar.db")
+    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
+    repo.start_scan("blog-1")
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="blog-1",
+            item_type="blog",
+            external_id="post-1",
+            canonical_url="https://example.com/post-1",
+            title="Shared Title",
+            author="Author",
+            published_at=datetime(2026, 4, 14, tzinfo=timezone.utc),
+            excerpt="One",
+            content_text="One",
+        )
+    )
+    repo.upsert_source(SourceConfig(id="blog-2", kind="blog", label="Other Blog"))
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="blog-2",
+            item_type="blog",
+            external_id="post-2",
+            canonical_url="https://example.com/post-2",
+            title="Shared Title",
+            author="Author",
+            published_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+            excerpt="Two",
+            content_text="Two",
+        )
+    )
+
+    removed_items = repo.remove_source("blog-1", recursive=True)
+
+    assert removed_items == 1
+    assert [source.id for source in repo.list_sources()] == ["blog-2"]
+    items = repo.list_items(limit=10)
+    assert len(items) == 1
+    assert items[0].source_id == "blog-2"
+    matches = repo.find_items_by_title("Shared Title")
+    assert len(matches) == 1
+    assert matches[0].source_id == "blog-2"
+    with repo.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM scans WHERE source_id = ?",
+            ("blog-1",),
+        ).fetchone()[0] == 0
 
 
 def test_dedupes_by_canonical_url(tmp_path: Path) -> None:
@@ -330,6 +405,59 @@ def test_find_items_by_title_returns_exact_matches(tmp_path: Path) -> None:
 
     assert len(matches) == 1
     assert matches[0].title == "Daily Briefing"
+
+
+def test_remove_item_deletes_content_and_refreshes_title_map(tmp_path: Path) -> None:
+    repo = Repository(tmp_path / "laminar.db")
+    repo.upsert_source(SourceConfig(id="yt-1", kind="youtube", label="Channel One"))
+    repo.upsert_source(SourceConfig(id="yt-2", kind="youtube", label="Channel Two"))
+    repo.upsert_item(
+        NormalizedItem(
+            item_id="item-1",
+            source_id="yt-1",
+            item_type="video",
+            external_id="abc123",
+            canonical_url="https://youtube.com/watch?v=abc123",
+            title="Daily Briefing",
+            author="Channel One",
+            published_at=datetime(2026, 4, 14, tzinfo=timezone.utc),
+            excerpt="One",
+            content_text="One",
+        )
+    )
+    repo.upsert_item(
+        NormalizedItem(
+            item_id="item-2",
+            source_id="yt-2",
+            item_type="video",
+            external_id="abc124",
+            canonical_url="https://youtube.com/watch?v=abc124",
+            title="Daily Briefing",
+            author="Channel Two",
+            published_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+            excerpt="Two",
+            content_text="Two",
+        )
+    )
+
+    assert repo.remove_item("item-1") is True
+    assert repo.get_item("item-1") is None
+    assert repo.find_items_by_title("Daily Briefing (Channel One)") == []
+    matches = repo.find_items_by_title("Daily Briefing")
+    assert len(matches) == 1
+    assert matches[0].item_id == "item-2"
+
+    with repo.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM item_contents WHERE item_id = ?",
+            ("item-1",),
+        ).fetchone()[0] == 0
+
+
+def test_remove_item_returns_false_when_missing(tmp_path: Path) -> None:
+    repo = Repository(tmp_path / "laminar.db")
+
+    assert repo.remove_item("missing-item") is False
 
 
 def test_title_map_updates_when_item_title_changes(tmp_path: Path) -> None:

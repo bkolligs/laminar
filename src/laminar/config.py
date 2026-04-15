@@ -42,8 +42,15 @@ def validate_source(source: SourceConfig) -> None:
     if source.kind in {"blog", "youtube"} and not source.feed_url:
         raise ConfigError(f"Source {source.id}: {source.kind} sources require feed_url")
 
-    if source.kind == "x" and not source.command and not source.metadata.get("api_url"):
-        raise ConfigError(f"Source {source.id}: x sources require command or api_url")
+    if (
+        source.kind == "x"
+        and not source.command
+        and not source.feed_url
+        and not source.metadata.get("api_url")
+    ):
+        raise ConfigError(
+            f"Source {source.id}: x sources require command, feed_url, or api_url"
+        )
 
 
 def _load_yaml_mapping(path: Path, *, label: str) -> dict[str, object]:

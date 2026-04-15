@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from laminar.config import ensure_default_config
+import pytest
+
+from laminar.config import ConfigError, ensure_default_config, validate_source
+from laminar.models import SourceConfig
 
 
 def test_loads_database_path_from_config(tmp_path: Path) -> None:
@@ -19,3 +22,24 @@ def test_creates_default_config_file(tmp_path: Path) -> None:
 
     assert config_path.exists()
     assert runtime.database_path == tmp_path / "laminar.db"
+
+
+def test_x_sources_can_validate_with_feed_url() -> None:
+    source = SourceConfig(
+        id="x-list",
+        kind="x",
+        label="Example List",
+        feed_url="https://x.com/i/lists/1234567890",
+    )
+
+    validate_source(source)
+
+
+def test_x_sources_still_require_a_command_or_url() -> None:
+    source = SourceConfig(id="x-empty", kind="x", label="Broken X")
+
+    with pytest.raises(
+        ConfigError,
+        match="x sources require command, feed_url, or api_url",
+    ):
+        validate_source(source)

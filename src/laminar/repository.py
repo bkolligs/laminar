@@ -162,6 +162,42 @@ class Repository:
             ).fetchall()
         return [_row_to_source(row) for row in rows]
 
+    def remove_source(self, source_id: str, *, recursive: bool = False) -> int | None:
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM sources WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+
+            item_rows = conn.execute(
+                "SELECT item_id, title FROM items WHERE source_id = ?",
+                (source_id,),
+            ).fetchall()
+            if item_rows and not recursive:
+                raise ValueError(
+                    f"Source {source_id} still has {len(item_rows)} items; rerun with --recursive"
+                )
+
+            for row in item_rows:
+                conn.execute(
+                    "DELETE FROM item_contents WHERE item_id = ?",
+                    (str(row["item_id"]),),
+                )
+                conn.execute(
+                    "DELETE FROM item_title_map WHERE item_id = ?",
+                    (str(row["item_id"]),),
+                )
+            if item_rows:
+                conn.execute("DELETE FROM items WHERE source_id = ?", (source_id,))
+                for title in {str(row["title"]) for row in item_rows}:
+                    self._refresh_title_map_for_title(conn, title)
+
+            conn.execute("DELETE FROM scans WHERE source_id = ?", (source_id,))
+            conn.execute("DELETE FROM sources WHERE source_id = ?", (source_id,))
+            return len(item_rows)
+
     def last_successful_scan_at(self, source_id: str) -> datetime | None:
         with self.connect() as conn:
             row = conn.execute(
@@ -351,6 +387,22 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return _row_to_item(row) if row else None
+
+    def remove_item(self, item_id: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT title FROM items WHERE item_id = ?",
+                (item_id,),
+            ).fetchone()
+            if row is None:
+                return False
+
+            title = str(row["title"])
+            conn.execute("DELETE FROM item_contents WHERE item_id = ?", (item_id,))
+            conn.execute("DELETE FROM item_title_map WHERE item_id = ?", (item_id,))
+            conn.execute("DELETE FROM items WHERE item_id = ?", (item_id,))
+            self._refresh_title_map_for_title(conn, title)
+            return True
 
     def find_items_by_id_prefix(self, prefix: str, *, limit: int = 10) -> list[StoredItem]:
         with self.connect() as conn:

@@ -80,6 +80,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra metadata to persist with the source.",
     )
 
+    remove_source = source_subparsers.add_parser("remove")
+    remove_source.add_argument("source_id")
+    remove_source.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="Also delete this source's items.",
+    )
+
     scan_parser = subparsers.add_parser("scan")
     scan_parser.set_defaults(command="scan")
     scan_parser.add_argument(
@@ -108,6 +117,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     items_show = items_subparsers.add_parser("show")
     items_show.add_argument("item_id")
+
+    items_remove = items_subparsers.add_parser("remove")
+    items_remove.add_argument("item_id")
 
     search_parser = subparsers.add_parser("search")
     search_parser.set_defaults(command="search")
@@ -142,6 +154,25 @@ def _run_source(args: argparse.Namespace) -> int:
         validate_source(source)
         repo.upsert_source(source)
         _console().print(f"Saved source {source.id} in {runtime.database_path}")
+        return 0
+    if args.source_command == "remove":
+        try:
+            removed_items = repo.remove_source(
+                args.source_id,
+                recursive=args.recursive,
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if removed_items is None:
+            print(f"Source {args.source_id} not found", file=sys.stderr)
+            return 1
+        if args.recursive:
+            _console().print(
+                f"Removed source {args.source_id} and deleted {removed_items} items from {runtime.database_path}"
+            )
+        else:
+            _console().print(f"Removed source {args.source_id} from {runtime.database_path}")
         return 0
 
     sources = repo.list_sources()
@@ -260,44 +291,14 @@ def _run_items(args: argparse.Namespace) -> int:
         _console().print(table)
         return 0
 
-    item = repo.get_item(args.item_id)
+    item = _resolve_item(repo, args.item_id)
     if item is None:
-        prefix_matches = repo.find_items_by_id_prefix(args.item_id)
-        if len(prefix_matches) == 1:
-            item = prefix_matches[0]
-        elif len(prefix_matches) > 1:
-            print(
-                f"Item ID prefix {args.item_id!r} is ambiguous. Try one of:",
-                file=sys.stderr,
-            )
-            for match in prefix_matches:
-                print(
-                    f"- {repo.shortest_unique_item_prefix(match.item_id)}\t{match.title}",
-                    file=sys.stderr,
-                )
-            return 1
-    if item is None:
-        matches = repo.find_items_by_title(args.item_id)
-        if len(matches) == 1:
-            item = matches[0]
-        elif len(matches) > 1:
-            print(
-                f"Multiple items found with title {args.item_id!r}; use the item ID instead.",
-                file=sys.stderr,
-            )
-            return 1
-    if item is None:
-        title_candidates = repo.lookup_titles_for_raw_title(args.item_id)
-        if len(title_candidates) > 1:
-            print(
-                f"Multiple items share the title {args.item_id!r}. Try one of:",
-                file=sys.stderr,
-            )
-            for candidate in title_candidates:
-                print(f"- {candidate}", file=sys.stderr)
-            return 1
-        print(f"Item {args.item_id} not found", file=sys.stderr)
         return 1
+
+    if args.items_command == "remove":
+        repo.remove_item(item.item_id)
+        _console().print(f"Removed item {item.item_id} from {runtime.database_path}")
+        return 0
 
     payload = {
         "item_id": item.item_id,
@@ -387,3 +388,45 @@ def _parse_metadata(pairs: list[str]) -> dict[str, object]:
             raise ConfigError(f"Metadata entries must be KEY=VALUE pairs: {pair}")
         metadata[key] = value
     return metadata
+
+
+def _resolve_item(repo: Repository, item_ref: str):
+    item = repo.get_item(item_ref)
+    if item is None:
+        prefix_matches = repo.find_items_by_id_prefix(item_ref)
+        if len(prefix_matches) == 1:
+            item = prefix_matches[0]
+        elif len(prefix_matches) > 1:
+            print(
+                f"Item ID prefix {item_ref!r} is ambiguous. Try one of:",
+                file=sys.stderr,
+            )
+            for match in prefix_matches:
+                print(
+                    f"- {repo.shortest_unique_item_prefix(match.item_id)}\t{match.title}",
+                    file=sys.stderr,
+                )
+            return None
+    if item is None:
+        matches = repo.find_items_by_title(item_ref)
+        if len(matches) == 1:
+            item = matches[0]
+        elif len(matches) > 1:
+            print(
+                f"Multiple items found with title {item_ref!r}; use the item ID instead.",
+                file=sys.stderr,
+            )
+            return None
+    if item is None:
+        title_candidates = repo.lookup_titles_for_raw_title(item_ref)
+        if len(title_candidates) > 1:
+            print(
+                f"Multiple items share the title {item_ref!r}. Try one of:",
+                file=sys.stderr,
+            )
+            for candidate in title_candidates:
+                print(f"- {candidate}", file=sys.stderr)
+            return None
+        print(f"Item {item_ref} not found", file=sys.stderr)
+        return None
+    return item
