@@ -7,6 +7,7 @@ from typing import Callable, Protocol
 from urllib.parse import parse_qsl, urlencode, urlparse
 from xml.etree import ElementTree
 
+from laminar.config import normalize_source_kind
 from laminar.fetch import fetch_text
 from laminar.models import NormalizedItem, SourceConfig
 from laminar.youtube import (
@@ -26,7 +27,7 @@ class Adapter(Protocol):
     ) -> list[NormalizedItem]: ...
 
 
-class BlogAdapter:
+class FeedAdapter:
     def scan(
         self,
         source: SourceConfig,
@@ -63,10 +64,10 @@ class BlogAdapter:
             items.append(
                 NormalizedItem(
                     source_id=source.id,
-                    item_type="blog",
+                    item_type="feed",
                     external_id=_find_text(entry, "./guid") or url,
                     canonical_url=url,
-                    title=_find_text(entry, "./title") or "(untitled blog post)",
+                    title=_find_text(entry, "./title") or "(untitled feed item)",
                     author=_find_text(entry, "./author") or channel_title,
                     published_at=published_at,
                     excerpt=description,
@@ -107,11 +108,11 @@ class BlogAdapter:
             items.append(
                 NormalizedItem(
                     source_id=source.id,
-                    item_type="blog",
+                    item_type="feed",
                     external_id=_find_text(entry, "./atom:id", ns) or url,
                     canonical_url=url,
                     title=_find_text(entry, "./atom:title", ns)
-                    or "(untitled blog post)",
+                    or "(untitled feed item)",
                     author=_find_text(entry, "./atom:author/atom:name", ns)
                     or feed_title,
                     published_at=published_at,
@@ -272,13 +273,14 @@ class XAdapter:
 
 
 def build_adapter(source: SourceConfig) -> Adapter:
-    if source.kind == "blog":
-        return BlogAdapter()
-    if source.kind == "youtube":
+    kind = normalize_source_kind(source.kind)
+    if kind == "feed":
+        return FeedAdapter()
+    if kind == "youtube":
         return YouTubeAdapter()
-    if source.kind == "x":
+    if kind == "x":
         return XAdapter()
-    raise ValueError(f"Unsupported source kind: {source.kind}")
+    raise ValueError(f"Unsupported source kind: {kind}")
 
 
 def _find_text(

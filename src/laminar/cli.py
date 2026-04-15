@@ -12,6 +12,7 @@ from laminar.config import (
     AppConfig,
     ConfigError,
     ensure_default_config,
+    normalize_source_kind,
     validate_source,
 )
 from laminar.models import SourceConfig
@@ -65,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     source_subparsers.add_parser("list")
 
     add_source = source_subparsers.add_parser("add")
-    add_source.add_argument("--kind", required=True, choices=["blog", "youtube", "x"])
+    add_source.add_argument("--kind", required=True, choices=["feed", "youtube", "x"])
     add_source.add_argument("--label", required=True)
     add_source.add_argument("--provider")
     add_source.add_argument("--feed-url")
@@ -114,7 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--source",
         dest="source_kinds",
         action="append",
-        choices=["blog", "youtube", "x"],
+        choices=["feed", "youtube", "x"],
         default=[],
         help="Limit scan to one or more source kinds.",
     )
@@ -226,13 +227,16 @@ def _run_scan(args: argparse.Namespace) -> int:
 
     sources = repo.list_sources()
     selected = {source_id for source_id in args.source_ids}
-    selected_kinds = set(args.source_kinds)
+    selected_kinds = {normalize_source_kind(kind) for kind in args.source_kinds}
     active_sources = [
         source
         for source in sources
         if source.enabled
         and (not selected or source.id in selected)
-        and (not selected_kinds or source.kind in selected_kinds)
+        and (
+            not selected_kinds
+            or normalize_source_kind(source.kind) in selected_kinds
+        )
     ]
 
     total_seen = 0
@@ -401,7 +405,7 @@ def _build_source_from_args(args: argparse.Namespace) -> SourceConfig:
     costs_money = args.costs_money or args.kind == "x"
     return SourceConfig(
         id=str(uuid4()),
-        kind=args.kind,
+        kind=normalize_source_kind(args.kind),
         label=args.label,
         enabled=not args.disable,
         costs_money=costs_money,

@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from laminar.config import normalize_source_kind
 from laminar.models import NormalizedItem, SourceConfig, StoredItem
 
 
@@ -575,7 +576,7 @@ def _row_to_item(row: sqlite3.Row) -> StoredItem:
 
 
 def _row_to_source(row: sqlite3.Row) -> SourceConfig:
-    kind = str(row["kind"])
+    kind = normalize_source_kind(str(row["kind"]))
     return SourceConfig(
         id=row["source_id"],
         kind=kind,

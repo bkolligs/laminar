@@ -139,23 +139,56 @@ def test_x_sources_are_treated_as_paid_when_loading_legacy_rows(tmp_path: Path) 
     assert sources[0].costs_money is True
 
 
+def test_legacy_blog_sources_load_as_feed(tmp_path: Path) -> None:
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    with repo.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO sources (
+                source_id, kind, label, enabled, costs_money, provider, feed_url, handle,
+                command_json, transcript_languages_json, poll_interval_minutes, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "blog-legacy",
+                "blog",
+                "Legacy Blog",
+                1,
+                0,
+                None,
+                "https://example.com/feed.xml",
+                None,
+                "[]",
+                "[]",
+                None,
+                "{}",
+            ),
+        )
+
+    sources = repo.list_sources()
+
+    assert len(sources) == 1
+    assert sources[0].kind == "feed"
+
+
 def test_records_last_successful_scan_time(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
-    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
 
     scanned_at = datetime(2026, 4, 14, 18, 30, tzinfo=timezone.utc)
-    repo.mark_source_scan_succeeded("blog-1", scanned_at)
+    repo.mark_source_scan_succeeded("feed-1", scanned_at)
 
-    assert repo.last_successful_scan_at("blog-1") == scanned_at
+    assert repo.last_successful_scan_at("feed-1") == scanned_at
 
 
 def test_remove_source_requires_recursive_when_items_exist(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
-    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
     repo.upsert_item(
         NormalizedItem(
-            source_id="blog-1",
-            item_type="blog",
+            source_id="feed-1",
+            item_type="feed",
             external_id="post-1",
             canonical_url="https://example.com/post-1",
             title="Post One",
@@ -170,17 +203,17 @@ def test_remove_source_requires_recursive_when_items_exist(tmp_path: Path) -> No
         ValueError,
         match="still has 1 items; rerun with --recursive",
     ):
-        repo.remove_source("blog-1")
+        repo.remove_source("feed-1")
 
 
 def test_remove_source_recursive_deletes_source_items_and_scans(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
-    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
-    repo.start_scan("blog-1")
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
+    repo.start_scan("feed-1")
     repo.upsert_item(
         NormalizedItem(
-            source_id="blog-1",
-            item_type="blog",
+            source_id="feed-1",
+            item_type="feed",
             external_id="post-1",
             canonical_url="https://example.com/post-1",
             title="Shared Title",
@@ -190,11 +223,11 @@ def test_remove_source_recursive_deletes_source_items_and_scans(tmp_path: Path) 
             content_text="One",
         )
     )
-    repo.upsert_source(SourceConfig(id="blog-2", kind="blog", label="Other Blog"))
+    repo.upsert_source(SourceConfig(id="feed-2", kind="feed", label="Other Feed"))
     repo.upsert_item(
         NormalizedItem(
-            source_id="blog-2",
-            item_type="blog",
+            source_id="feed-2",
+            item_type="feed",
             external_id="post-2",
             canonical_url="https://example.com/post-2",
             title="Shared Title",
@@ -205,28 +238,28 @@ def test_remove_source_recursive_deletes_source_items_and_scans(tmp_path: Path) 
         )
     )
 
-    removed_items = repo.remove_source("blog-1", recursive=True)
+    removed_items = repo.remove_source("feed-1", recursive=True)
 
     assert removed_items == 1
-    assert [source.id for source in repo.list_sources()] == ["blog-2"]
+    assert [source.id for source in repo.list_sources()] == ["feed-2"]
     items = repo.list_items(limit=10)
     assert len(items) == 1
-    assert items[0].source_id == "blog-2"
+    assert items[0].source_id == "feed-2"
     matches = repo.find_items_by_title("Shared Title")
     assert len(matches) == 1
-    assert matches[0].source_id == "blog-2"
+    assert matches[0].source_id == "feed-2"
     with repo.connect() as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM scans WHERE source_id = ?",
-            ("blog-1",),
+            ("feed-1",),
         ).fetchone()[0] == 0
 
 
 def test_dedupes_by_canonical_url(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
     first = NormalizedItem(
-        source_id="blog-1",
-        item_type="blog",
+        source_id="feed-1",
+        item_type="feed",
         external_id="1",
         canonical_url="https://example.com/post",
         title="First title",
@@ -236,8 +269,8 @@ def test_dedupes_by_canonical_url(tmp_path: Path) -> None:
         content_text="One",
     )
     second = NormalizedItem(
-        source_id="blog-2",
-        item_type="blog",
+        source_id="feed-2",
+        item_type="feed",
         external_id="2",
         canonical_url="https://example.com/post",
         title="Updated title",

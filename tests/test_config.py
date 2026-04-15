@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from laminar.config import ConfigError, ensure_default_config, validate_source
+from laminar.config import (
+    ConfigError,
+    ensure_default_config,
+    normalize_source_kind,
+    validate_source,
+)
 from laminar.models import SourceConfig
 
 
@@ -43,3 +48,7 @@ def test_x_sources_still_require_a_command_or_url() -> None:
         match="x sources require command, feed_url, or api_url",
     ):
         validate_source(source)
+
+
+def test_normalizes_legacy_blog_kind_to_feed() -> None:
+    assert normalize_source_kind("blog") == "feed"

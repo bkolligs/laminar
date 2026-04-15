@@ -110,9 +110,9 @@ def test_scan_and_query(tmp_path: Path) -> None:
                 "source",
                 "add",
                 "--kind",
-                "blog",
+                "feed",
                 "--label",
-                "Example Blog",
+                "Example Feed",
                 "--feed-url",
                 blog_feed.as_uri(),
             ],
@@ -207,7 +207,7 @@ def test_scan_continues_after_source_failure_and_reports_item_statuses(
 
     failing = SourceConfig(
         id="bad-source",
-        kind="blog",
+        kind="feed",
         label="Broken Feed",
         feed_url="https://example.invalid/feed.xml",
     )
@@ -446,9 +446,9 @@ def test_scan_uses_last_successful_scan_time_for_incremental_blog_and_youtube(
                     "source",
                     "add",
                     "--kind",
-                    "blog",
+                    "feed",
                     "--label",
-                    "Example Blog",
+                    "Example Feed",
                     "--feed-url",
                     blog_feed.as_uri(),
                 ],
@@ -475,7 +475,7 @@ def test_scan_uses_last_successful_scan_time_for_incremental_blog_and_youtube(
         repo = Repository(db_path)
         sources_by_label = {source.label: source.id for source in repo.list_sources()}
         cutoff = datetime(2026, 4, 14, 12, 30, tzinfo=timezone.utc)
-        blog_source_id = sources_by_label["Example Blog"]
+        blog_source_id = sources_by_label["Example Feed"]
         youtube_source_id = sources_by_label["Example Channel"]
         repo.mark_source_scan_succeeded(blog_source_id, cutoff)
         repo.mark_source_scan_succeeded(youtube_source_id, cutoff)
@@ -627,9 +627,9 @@ def test_scan_verbose_reports_incremental_cutoffs_and_skipped_items(
                 "source",
                 "add",
                 "--kind",
-                "blog",
+                "feed",
                 "--label",
-                "Example Blog",
+                "Example Feed",
                 "--feed-url",
                 blog_feed.as_uri(),
             ],
@@ -658,7 +658,7 @@ def test_scan_verbose_reports_incremental_cutoffs_and_skipped_items(
     repo = Repository(db_path)
     sources_by_label = {source.label: source.id for source in repo.list_sources()}
     cutoff = datetime(2026, 4, 14, 12, 30, tzinfo=timezone.utc)
-    repo.mark_source_scan_succeeded(sources_by_label["Example Blog"], cutoff)
+    repo.mark_source_scan_succeeded(sources_by_label["Example Feed"], cutoff)
     repo.mark_source_scan_succeeded(sources_by_label["Example X"], cutoff)
 
     scan_buffer = io.StringIO()
@@ -677,7 +677,7 @@ def test_scan_verbose_reports_incremental_cutoffs_and_skipped_items(
         assert run(args) == 0
 
     output = scan_buffer.getvalue()
-    blog_source_id = sources_by_label["Example Blog"]
+    blog_source_id = sources_by_label["Example Feed"]
     x_source_id = sources_by_label["Example X"]
     assert f"{blog_source_id}: incremental cutoff is 2026-04-14T12:30:00+00:00" in output
     assert (
@@ -700,8 +700,8 @@ def test_scan_records_scan_start_as_success_watermark(tmp_path: Path) -> None:
     repo.upsert_source(
         SourceConfig(
             id="blog-source",
-            kind="blog",
-            label="Example Blog",
+            kind="feed",
+            label="Example Feed",
             feed_url="https://example.com/feed.xml",
         )
     )
@@ -712,7 +712,7 @@ def test_scan_records_scan_start_as_success_watermark(tmp_path: Path) -> None:
     observed_since: list[datetime | None] = []
     returned_item = NormalizedItem(
         source_id="blog-source",
-        item_type="blog",
+        item_type="feed",
         external_id="post-1",
         canonical_url="https://example.com/post-1",
         title="Published During Scan",
@@ -762,8 +762,8 @@ def test_scan_can_filter_by_source_kind(tmp_path: Path) -> None:
     repo = Repository(db_path)
     blog_source = SourceConfig(
         id="blog-source",
-        kind="blog",
-        label="Example Blog",
+        kind="feed",
+        label="Example Feed",
         feed_url="https://example.com/feed.xml",
     )
     youtube_source = SourceConfig(
@@ -802,8 +802,8 @@ def test_scan_can_filter_by_source_kind(tmp_path: Path) -> None:
                 NormalizedItem(
                     source_id=source.id,
                     item_type=(
-                        "blog"
-                        if source.kind == "blog"
+                        "feed"
+                        if source.kind == "feed"
                         else "video"
                         if source.kind == "youtube"
                         else "x_post"
@@ -820,7 +820,7 @@ def test_scan_can_filter_by_source_kind(tmp_path: Path) -> None:
 
     def fake_build_adapter(source: SourceConfig):
         if source.id == "blog-source":
-            return StaticAdapter("Blog item")
+            return StaticAdapter("Feed item")
         if source.id == "youtube-source":
             return StaticAdapter("YouTube item")
         if source.id == "x-source":
@@ -850,8 +850,8 @@ def test_scan_can_combine_source_kind_and_source_id_filters(tmp_path: Path) -> N
     repo.upsert_source(
         SourceConfig(
             id="blog-source",
-            kind="blog",
-            label="Example Blog",
+            kind="feed",
+            label="Example Feed",
             feed_url="https://example.com/feed.xml",
         )
     )
@@ -965,9 +965,9 @@ def test_source_list_reads_sources_from_database(tmp_path: Path) -> None:
             "source",
             "add",
             "--kind",
-            "blog",
+            "feed",
             "--label",
-            "Example Blog",
+            "Example Feed",
             "--feed-url",
             "file:///tmp/feed.xml",
         ]
@@ -979,8 +979,8 @@ def test_source_list_reads_sources_from_database(tmp_path: Path) -> None:
         assert run(list_args) == 0
 
     output = buffer.getvalue().strip()
-    assert "Example Blog" in output
-    assert "blog" in output
+    assert "Example Feed" in output
+    assert "feed" in output
     assert "enabled" in output
     assert "free" in output
     source_id = repo_source_id_from_db(db_path)
@@ -1129,13 +1129,13 @@ def test_source_remove_deletes_source_without_items(tmp_path: Path) -> None:
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
     repo = Repository(db_path)
-    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
 
     with redirect_stdout(io.StringIO()) as buffer:
-        remove_args = parser.parse_args(["--db", str(db_path), "source", "remove", "blog-1"])
+        remove_args = parser.parse_args(["--db", str(db_path), "source", "remove", "feed-1"])
         assert run(remove_args) == 0
 
-    assert "Removed source blog-1" in buffer.getvalue()
+    assert "Removed source feed-1" in buffer.getvalue()
     assert repo.list_sources() == []
 
 
@@ -1145,11 +1145,11 @@ def test_source_remove_rejects_non_recursive_delete_when_items_exist(
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
     repo = Repository(db_path)
-    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
     repo.upsert_item(
         NormalizedItem(
-            source_id="blog-1",
-            item_type="blog",
+            source_id="feed-1",
+            item_type="feed",
             external_id="post-1",
             canonical_url="https://example.com/post-1",
             title="Post One",
@@ -1160,12 +1160,12 @@ def test_source_remove_rejects_non_recursive_delete_when_items_exist(
         )
     )
 
-    remove_args = parser.parse_args(["--db", str(db_path), "source", "remove", "blog-1"])
+    remove_args = parser.parse_args(["--db", str(db_path), "source", "remove", "feed-1"])
     assert run(remove_args) == 1
 
     captured = capsys.readouterr()
     assert "rerun with --recursive" in captured.err
-    assert [source.id for source in repo.list_sources()] == ["blog-1"]
+    assert [source.id for source in repo.list_sources()] == ["feed-1"]
     assert len(repo.list_items(limit=10)) == 1
 
 
@@ -1173,11 +1173,11 @@ def test_source_remove_recursive_deletes_source_and_items(tmp_path: Path) -> Non
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
     repo = Repository(db_path)
-    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
     repo.upsert_item(
         NormalizedItem(
-            source_id="blog-1",
-            item_type="blog",
+            source_id="feed-1",
+            item_type="feed",
             external_id="post-1",
             canonical_url="https://example.com/post-1",
             title="Post One",
@@ -1190,12 +1190,12 @@ def test_source_remove_recursive_deletes_source_and_items(tmp_path: Path) -> Non
 
     with redirect_stdout(io.StringIO()) as buffer:
         remove_args = parser.parse_args(
-            ["--db", str(db_path), "source", "remove", "--recursive", "blog-1"]
+            ["--db", str(db_path), "source", "remove", "--recursive", "feed-1"]
         )
         assert run(remove_args) == 0
 
     output = buffer.getvalue()
-    assert "Removed source blog-1 and deleted 1 items" in output
+    assert "Removed source feed-1 and deleted 1 items" in output
     assert repo.list_sources() == []
     assert repo.list_items(limit=10) == []
 
@@ -1228,9 +1228,9 @@ def test_scan_and_query_atom_blog_feed(tmp_path: Path) -> None:
             "source",
             "add",
             "--kind",
-            "blog",
+            "feed",
             "--label",
-            "Example Atom Blog",
+            "Example Atom Feed",
             "--feed-url",
             atom_feed.as_uri(),
         ]
