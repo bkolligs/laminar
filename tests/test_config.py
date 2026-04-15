@@ -1,50 +1,21 @@
 from pathlib import Path
 
-import pytest
-
-from laminar.config import ConfigError, load_config
+from laminar.config import ensure_default_config
 
 
-def test_load_config(tmp_path: Path) -> None:
-    path = tmp_path / "laminar.yaml"
-    path.write_text(
-        """
-        sources:
-          - id: blog-1
-            kind: blog
-            label: Example Blog
-            enabled: true
-            feed_url: file:///tmp/feed.xml
-          - id: x-1
-            kind: x
-            label: Example X
-            command:
-              - xurl
-              - https://api.x.test
-        """
-    )
+def test_loads_database_path_from_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("database_path: custom.db\n")
 
-    sources = load_config(path)
+    runtime = ensure_default_config(config_path)
 
-    assert [source.id for source in sources] == ["blog-1", "x-1"]
-    assert sources[1].command[0] == "xurl"
+    assert runtime.database_path == tmp_path / "custom.db"
 
 
-def test_rejects_duplicate_ids(tmp_path: Path) -> None:
-    path = tmp_path / "laminar.yaml"
-    path.write_text(
-        """
-        sources:
-          - id: dup
-            kind: blog
-            label: One
-            feed_url: file:///tmp/feed.xml
-          - id: dup
-            kind: youtube
-            label: Two
-            feed_url: file:///tmp/feed.xml
-        """
-    )
+def test_creates_default_config_file(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
 
-    with pytest.raises(ConfigError):
-        load_config(path)
+    runtime = ensure_default_config(config_path)
+
+    assert config_path.exists()
+    assert runtime.database_path == tmp_path / "laminar.db"

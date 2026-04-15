@@ -15,9 +15,13 @@ CREATE TABLE IF NOT EXISTS sources (
     kind TEXT NOT NULL,
     label TEXT NOT NULL,
     enabled INTEGER NOT NULL,
+    costs_money INTEGER NOT NULL DEFAULT 0,
     provider TEXT,
     feed_url TEXT,
     handle TEXT,
+    command_json TEXT NOT NULL DEFAULT '[]',
+    transcript_languages_json TEXT NOT NULL DEFAULT '[]',
+    poll_interval_minutes INTEGER,
     metadata_json TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -34,7 +38,7 @@ CREATE TABLE IF NOT EXISTS scans (
 );
 
 CREATE TABLE IF NOT EXISTS items (
-    item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL,
     item_type TEXT NOT NULL,
     external_id TEXT,
@@ -58,10 +62,20 @@ ON items(canonical_url)
 WHERE canonical_url IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS item_contents (
-    item_id INTEGER PRIMARY KEY,
+    item_id TEXT PRIMARY KEY,
     content_text TEXT,
     FOREIGN KEY(item_id) REFERENCES items(item_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS item_title_map (
+    title TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    PRIMARY KEY (title, item_id),
+    FOREIGN KEY(item_id) REFERENCES items(item_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_item_title_map_title
+ON item_title_map(title);
 """
 
 
@@ -71,6 +85,7 @@ class Repository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._ensure_schema_columns(conn)
 
     @contextmanager
     def connect(self):
@@ -82,35 +97,66 @@ class Repository:
         finally:
             conn.close()
 
-    def sync_sources(self, sources: list[SourceConfig]) -> None:
+    def upsert_source(self, source: SourceConfig) -> None:
         with self.connect() as conn:
-            for source in sources:
-                conn.execute(
-                    """
-                    INSERT INTO sources (
-                        source_id, kind, label, enabled, provider, feed_url, handle, metadata_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(source_id) DO UPDATE SET
-                        kind = excluded.kind,
-                        label = excluded.label,
-                        enabled = excluded.enabled,
-                        provider = excluded.provider,
-                        feed_url = excluded.feed_url,
-                        handle = excluded.handle,
-                        metadata_json = excluded.metadata_json,
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    (
-                        source.id,
-                        source.kind,
-                        source.label,
-                        int(source.enabled),
-                        source.provider,
-                        source.feed_url,
-                        source.handle,
-                        json.dumps(source.metadata, sort_keys=True),
-                    ),
-                )
+            conn.execute(
+                """
+                INSERT INTO sources (
+                    source_id, kind, label, enabled, costs_money, provider, feed_url, handle,
+                    command_json, transcript_languages_json, poll_interval_minutes, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id) DO UPDATE SET
+                    kind = excluded.kind,
+                    label = excluded.label,
+                    enabled = excluded.enabled,
+                    costs_money = excluded.costs_money,
+                    provider = excluded.provider,
+                    feed_url = excluded.feed_url,
+                    handle = excluded.handle,
+                    command_json = excluded.command_json,
+                    transcript_languages_json = excluded.transcript_languages_json,
+                    poll_interval_minutes = excluded.poll_interval_minutes,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    source.id,
+                    source.kind,
+                    source.label,
+                    int(source.enabled),
+                    int(source.costs_money),
+                    source.provider,
+                    source.feed_url,
+                    source.handle,
+                    json.dumps(source.command),
+                    json.dumps(source.transcript_languages),
+                    source.poll_interval_minutes,
+                    json.dumps(source.metadata, sort_keys=True),
+                ),
+            )
+
+    def list_sources(self) -> list[SourceConfig]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    source_id,
+                    kind,
+                    label,
+                    enabled,
+                    costs_money,
+                    provider,
+                    feed_url,
+                    handle,
+                    command_json,
+                    transcript_languages_json,
+                    poll_interval_minutes,
+                    metadata_json
+                FROM sources
+                ORDER BY source_id
+                """
+            ).fetchall()
+        return [_row_to_source(row) for row in rows]
 
     def start_scan(self, source_id: str | None) -> int:
         with self.connect() as conn:
@@ -151,20 +197,27 @@ class Repository:
                 ).fetchone()
             if existing is None and item.external_id:
                 existing = conn.execute(
-                    "SELECT item_id FROM items WHERE source_id = ? AND external_id = ?",
+                    "SELECT item_id, title FROM items WHERE source_id = ? AND external_id = ?",
                     (item.source_id, item.external_id),
+                ).fetchone()
+            elif existing is not None:
+                existing = conn.execute(
+                    "SELECT item_id, title FROM items WHERE item_id = ?",
+                    (existing["item_id"],),
                 ).fetchone()
 
             if existing is None:
-                cursor = conn.execute(
+                item_id = item.item_id
+                conn.execute(
                     """
                     INSERT INTO items (
-                        source_id, item_type, external_id, canonical_url, title, author, published_at,
+                        item_id, source_id, item_type, external_id, canonical_url, title, author, published_at,
                         retrieved_at, excerpt, content_status, content_language, content_source,
                         raw_payload_json, content_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        item_id,
                         item.source_id,
                         item.item_type,
                         item.external_id,
@@ -181,14 +234,15 @@ class Repository:
                         content_hash,
                     ),
                 )
-                item_id = int(cursor.lastrowid)
                 conn.execute(
                     "INSERT INTO item_contents (item_id, content_text) VALUES (?, ?)",
                     (item_id, item.content_text),
                 )
+                self._refresh_title_map_for_title(conn, item.title)
                 return True
 
-            item_id = int(existing["item_id"])
+            item_id = str(existing["item_id"])
+            previous_title = str(existing["title"])
             conn.execute(
                 """
                 UPDATE items
@@ -218,6 +272,9 @@ class Repository:
                 """,
                 (item_id, item.content_text),
             )
+            if previous_title != item.title:
+                self._refresh_title_map_for_title(conn, previous_title)
+            self._refresh_title_map_for_title(conn, item.title)
             return False
 
     def list_items(
@@ -250,7 +307,7 @@ class Repository:
             rows = conn.execute(query, params).fetchall()
         return [_row_to_item(row) for row in rows]
 
-    def get_item(self, item_id: int) -> StoredItem | None:
+    def get_item(self, item_id: str) -> StoredItem | None:
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -262,6 +319,77 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return _row_to_item(row) if row else None
+
+    def find_items_by_id_prefix(self, prefix: str, *, limit: int = 10) -> list[StoredItem]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT i.*, c.content_text
+                FROM items i
+                LEFT JOIN item_contents c ON c.item_id = i.item_id
+                WHERE i.item_id LIKE ? || '%'
+                ORDER BY i.item_id
+                LIMIT ?
+                """,
+                (prefix, limit),
+            ).fetchall()
+        return [_row_to_item(row) for row in rows]
+
+    def shortest_unique_item_prefix(self, item_id: str) -> str:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                WITH RECURSIVE prefix_lengths(length) AS (
+                    SELECT 1
+                    UNION ALL
+                    SELECT length + 1
+                    FROM prefix_lengths
+                    WHERE length < length(?)
+                )
+                SELECT substr(?, 1, prefix_lengths.length) AS prefix
+                FROM prefix_lengths
+                WHERE (
+                    SELECT COUNT(*)
+                    FROM items i
+                    WHERE i.item_id LIKE substr(?, 1, prefix_lengths.length) || '%'
+                ) = 1
+                ORDER BY prefix_lengths.length
+                LIMIT 1
+                """,
+                (item_id, item_id, item_id),
+            ).fetchone()
+        if row is None:
+            return item_id
+        return str(row["prefix"])
+
+    def find_items_by_title(self, title: str) -> list[StoredItem]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT i.*, c.content_text
+                FROM item_title_map m
+                JOIN items i ON i.item_id = m.item_id
+                LEFT JOIN item_contents c ON c.item_id = i.item_id
+                WHERE m.title = ?
+                ORDER BY COALESCE(i.published_at, i.retrieved_at) DESC
+                """,
+                (title,),
+            ).fetchall()
+        return [_row_to_item(row) for row in rows]
+
+    def lookup_titles_for_raw_title(self, raw_title: str) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT m.title
+                FROM item_title_map m
+                JOIN items i ON i.item_id = m.item_id
+                WHERE i.title = ?
+                ORDER BY m.title
+                """,
+                (raw_title,),
+            ).fetchall()
+        return [str(row["title"]) for row in rows]
 
     def search(self, query: str, *, limit: int = 20) -> list[StoredItem]:
         pattern = f"%{query.lower()}%"
@@ -293,10 +421,58 @@ class Repository:
         ]
         return "|".join(parts)
 
+    @staticmethod
+    def _refresh_title_map_for_title(conn: sqlite3.Connection, title: str) -> None:
+        rows = conn.execute(
+            """
+            SELECT i.item_id, i.title, COALESCE(s.label, i.source_id) AS source_name
+            FROM items i
+            LEFT JOIN sources s ON s.source_id = i.source_id
+            WHERE i.title = ?
+            ORDER BY COALESCE(i.published_at, i.retrieved_at) DESC, i.item_id
+            """,
+            (title,),
+        ).fetchall()
+
+        item_ids = [str(row["item_id"]) for row in rows]
+        conn.execute("DELETE FROM item_title_map WHERE item_id IN (SELECT item_id FROM items WHERE title = ?)", (title,))
+        if not rows:
+            return
+
+        if len(rows) == 1:
+            conn.execute(
+                "INSERT INTO item_title_map (title, item_id) VALUES (?, ?)",
+                (title, item_ids[0]),
+            )
+            return
+
+        used_names: set[str] = set()
+        for row in rows:
+            base_name = f"{row['title']} ({row['source_name']})"
+            lookup_name = base_name
+            if lookup_name in used_names:
+                lookup_name = f"{base_name} [{str(row['item_id'])[:8]}]"
+            used_names.add(lookup_name)
+            conn.execute(
+                "INSERT INTO item_title_map (title, item_id) VALUES (?, ?)",
+                (lookup_name, str(row["item_id"])),
+            )
+
+
+    @staticmethod
+    def _ensure_schema_columns(conn: sqlite3.Connection) -> None:
+        source_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
+        }
+        if "costs_money" not in source_columns:
+            conn.execute(
+                "ALTER TABLE sources ADD COLUMN costs_money INTEGER NOT NULL DEFAULT 0"
+            )
+
 
 def _row_to_item(row: sqlite3.Row) -> StoredItem:
     return StoredItem(
-        item_id=int(row["item_id"]),
+        item_id=str(row["item_id"]),
         source_id=row["source_id"],
         item_type=row["item_type"],
         title=row["title"],
@@ -312,6 +488,24 @@ def _row_to_item(row: sqlite3.Row) -> StoredItem:
     )
 
 
+def _row_to_source(row: sqlite3.Row) -> SourceConfig:
+    kind = str(row["kind"])
+    return SourceConfig(
+        id=row["source_id"],
+        kind=kind,
+        label=row["label"],
+        enabled=bool(row["enabled"]),
+        costs_money=bool(row["costs_money"]) or kind == "x",
+        provider=row["provider"],
+        feed_url=row["feed_url"],
+        handle=row["handle"],
+        command=_json_list(row["command_json"]),
+        transcript_languages=_json_list(row["transcript_languages_json"]),
+        poll_interval_minutes=row["poll_interval_minutes"],
+        metadata=_json_object(row["metadata_json"]),
+    )
+
+
 def _dt(value: datetime | None) -> str | None:
     if value is None:
         return None
@@ -322,3 +516,21 @@ def _parse_dt(value: str | None) -> datetime | None:
     if value is None:
         return None
     return datetime.fromisoformat(value)
+
+
+def _json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    data = json.loads(value)
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, str)]
+
+
+def _json_object(value: str | None) -> dict[str, object]:
+    if not value:
+        return {}
+    data = json.loads(value)
+    if not isinstance(data, dict):
+        return {}
+    return data

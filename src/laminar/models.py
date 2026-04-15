@@ -3,10 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def new_uuid() -> str:
+    return str(uuid4())
 
 
 @dataclass(slots=True)
@@ -15,6 +20,7 @@ class SourceConfig:
     kind: str
     label: str
     enabled: bool = True
+    costs_money: bool = False
     provider: str | None = None
     feed_url: str | None = None
     handle: str | None = None
@@ -40,11 +46,12 @@ class NormalizedItem:
     content_source: str | None = None
     raw_payload: dict[str, Any] = field(default_factory=dict)
     retrieved_at: datetime = field(default_factory=utc_now)
+    item_id: str = field(default_factory=new_uuid)
 
 
 @dataclass(slots=True)
 class StoredItem:
-    item_id: int
+    item_id: str
     source_id: str
     item_type: str
     title: str

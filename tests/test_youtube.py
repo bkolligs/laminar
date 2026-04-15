@@ -2,7 +2,9 @@ from laminar.youtube import extract_video_id, format_timestamp
 
 
 def test_extract_video_id_from_urls() -> None:
-    assert extract_video_id("https://www.youtube.com/watch?v=EBw7gsDPAYQ") == "EBw7gsDPAYQ"
+    assert (
+        extract_video_id("https://www.youtube.com/watch?v=EBw7gsDPAYQ") == "EBw7gsDPAYQ"
+    )
     assert extract_video_id("https://youtu.be/EBw7gsDPAYQ") == "EBw7gsDPAYQ"
 
 

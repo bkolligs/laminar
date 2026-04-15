@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -11,84 +12,30 @@ class ConfigError(ValueError):
     pass
 
 
-def load_config(path: str | Path) -> list[SourceConfig]:
+DEFAULT_CONFIG_YAML = """database_path: laminar.db
+"""
+
+
+@dataclass(slots=True)
+class AppConfig:
+    config_path: Path
+    database_path: Path
+
+
+def ensure_default_config(path: str | Path) -> AppConfig:
     config_path = Path(path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     if not config_path.exists():
-        raise ConfigError(f"Config file not found: {config_path}")
+        config_path.write_text(DEFAULT_CONFIG_YAML)
 
-    try:
-        data = yaml.safe_load(config_path.read_text()) or {}
-    except yaml.YAMLError as exc:
-        raise ConfigError(f"Invalid YAML: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ConfigError("Config must be a mapping with a top-level 'sources' key")
-
-    raw_sources = data.get("sources")
-    if not isinstance(raw_sources, list) or not raw_sources:
-        raise ConfigError("Config must define at least one source entry under 'sources'")
-
-    sources: list[SourceConfig] = []
-    seen_ids: set[str] = set()
-    for index, raw_source in enumerate(raw_sources, start=1):
-        if not isinstance(raw_source, dict):
-            raise ConfigError(f"Source entry #{index} must be a mapping")
-
-        source_id = _require_str(raw_source, "id")
-        if source_id in seen_ids:
-            raise ConfigError(f"Duplicate source id: {source_id}")
-        seen_ids.add(source_id)
-
-        kind = _require_str(raw_source, "kind")
-        label = _require_str(raw_source, "label")
-        enabled = bool(raw_source.get("enabled", True))
-        provider = _optional_str(raw_source, "provider")
-        feed_url = _optional_str(raw_source, "feed_url")
-        handle = _optional_str(raw_source, "handle")
-        command = _optional_str_list(raw_source, "command")
-        transcript_languages = _optional_str_list(raw_source, "transcript_languages")
-        poll_interval = raw_source.get("poll_interval_minutes")
-        if poll_interval is not None and not isinstance(poll_interval, int):
-            raise ConfigError(
-                f"Source {source_id}: poll_interval_minutes must be an integer"
-            )
-
-        metadata = {
-            key: value
-            for key, value in raw_source.items()
-            if key
-            not in {
-                "id",
-                "kind",
-                "label",
-                "enabled",
-                "provider",
-                "feed_url",
-                "handle",
-                "command",
-                "transcript_languages",
-                "poll_interval_minutes",
-            }
-        }
-
-        source = SourceConfig(
-            id=source_id,
-            kind=kind,
-            label=label,
-            enabled=enabled,
-            provider=provider,
-            feed_url=feed_url,
-            handle=handle,
-            command=command,
-            transcript_languages=transcript_languages,
-            poll_interval_minutes=poll_interval,
-            metadata=metadata,
-        )
-        _validate_source(source)
-        sources.append(source)
-    return sources
+    raw_config = _load_yaml_mapping(config_path, label="Config")
+    database_path = _resolve_optional_path(
+        raw_config, key="database_path", base_dir=config_path.parent
+    ) or (config_path.parent / "laminar.db")
+    return AppConfig(config_path=config_path, database_path=database_path)
 
 
-def _validate_source(source: SourceConfig) -> None:
+def validate_source(source: SourceConfig) -> None:
     if source.kind not in {"blog", "youtube", "x"}:
         raise ConfigError(f"Source {source.id}: unsupported kind {source.kind!r}")
 
@@ -99,28 +46,25 @@ def _validate_source(source: SourceConfig) -> None:
         raise ConfigError(f"Source {source.id}: x sources require command or api_url")
 
 
-def _require_str(raw_source: dict[str, object], key: str) -> str:
-    value = _optional_str(raw_source, key)
-    if not value:
-        raise ConfigError(f"Missing required string field: {key}")
-    return value
+def _load_yaml_mapping(path: Path, *, label: str) -> dict[str, object]:
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"Invalid YAML in {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"{label} file must be a YAML mapping")
+    return data
 
 
-def _optional_str(raw_source: dict[str, object], key: str) -> str | None:
-    value = raw_source.get(key)
+def _resolve_optional_path(
+    raw_config: dict[str, object], *, key: str, base_dir: Path
+) -> Path | None:
+    value = raw_config.get(key)
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"Field {key} must be a non-empty string")
-    return value.strip()
-
-
-def _optional_str_list(raw_source: dict[str, object], key: str) -> list[str]:
-    value = raw_source.get(key)
-    if value is None:
-        return []
-    if not isinstance(value, list) or not all(
-        isinstance(item, str) and item for item in value
-    ):
-        raise ConfigError(f"Field {key} must be a list of strings")
-    return [item.strip() for item in value]
+    candidate = Path(value.strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = base_dir / candidate
+    return candidate
