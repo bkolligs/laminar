@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from laminar.models import NormalizedItem, SourceConfig, StoredItem
@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS sources (
     transcript_languages_json TEXT NOT NULL DEFAULT '[]',
     poll_interval_minutes INTEGER,
     metadata_json TEXT NOT NULL,
+    last_successful_scan_at TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -103,8 +104,9 @@ class Repository:
                 """
                 INSERT INTO sources (
                     source_id, kind, label, enabled, costs_money, provider, feed_url, handle,
-                    command_json, transcript_languages_json, poll_interval_minutes, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    command_json, transcript_languages_json, poll_interval_minutes, metadata_json,
+                    last_successful_scan_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
                     kind = excluded.kind,
                     label = excluded.label,
@@ -132,6 +134,7 @@ class Repository:
                     json.dumps(source.transcript_languages),
                     source.poll_interval_minutes,
                     json.dumps(source.metadata, sort_keys=True),
+                    self.last_successful_scan_at(source.id),
                 ),
             )
 
@@ -151,12 +154,39 @@ class Repository:
                     command_json,
                     transcript_languages_json,
                     poll_interval_minutes,
-                    metadata_json
+                    metadata_json,
+                    last_successful_scan_at
                 FROM sources
                 ORDER BY source_id
                 """
             ).fetchall()
         return [_row_to_source(row) for row in rows]
+
+    def last_successful_scan_at(self, source_id: str) -> datetime | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT last_successful_scan_at FROM sources WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _parse_dt(row["last_successful_scan_at"])
+
+    def mark_source_scan_succeeded(
+        self,
+        source_id: str,
+        scanned_at: datetime | None = None,
+    ) -> None:
+        timestamp = scanned_at or datetime.now(timezone.utc)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE sources
+                SET last_successful_scan_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE source_id = ?
+                """,
+                (_dt(timestamp), source_id),
+            )
 
     def start_scan(self, source_id: str | None) -> int:
         with self.connect() as conn:
@@ -246,12 +276,14 @@ class Repository:
             conn.execute(
                 """
                 UPDATE items
-                SET title = ?, author = ?, published_at = ?, retrieved_at = ?, excerpt = ?,
+                SET external_id = ?, canonical_url = ?, title = ?, author = ?, published_at = ?, retrieved_at = ?, excerpt = ?,
                     content_status = ?, content_language = ?, content_source = ?,
                     raw_payload_json = ?, content_hash = ?
                 WHERE item_id = ?
                 """,
                 (
+                    item.external_id,
+                    item.canonical_url,
                     item.title,
                     item.author,
                     _dt(item.published_at),
@@ -468,6 +500,8 @@ class Repository:
             conn.execute(
                 "ALTER TABLE sources ADD COLUMN costs_money INTEGER NOT NULL DEFAULT 0"
             )
+        if "last_successful_scan_at" not in source_columns:
+            conn.execute("ALTER TABLE sources ADD COLUMN last_successful_scan_at TEXT")
 
 
 def _row_to_item(row: sqlite3.Row) -> StoredItem:

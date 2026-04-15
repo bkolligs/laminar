@@ -12,7 +12,7 @@ Current source types:
 Current storage model:
 - SQLite only
 - default state directory: `~/.laminar`
-- default config path: `~/.laminar/config.toml`
+- default config path: `~/.laminar/config.yaml`
 - default database path: `~/.laminar/laminar.db`
 
 ## Tooling
@@ -28,6 +28,7 @@ uv sync
 uv run pytest
 uv run laminar source validate
 uv run laminar scan
+uv run laminar scan --include-paid
 uv run laminar items list
 ```
 
@@ -57,14 +58,18 @@ uv run laminar items list
 - Blog ingestion is RSS/Atom-style feed ingestion.
 - YouTube items should include transcript text when captions are available.
 - X ingestion currently assumes `xurl` or another configured command returns JSON in the expected shape.
+- X sources are treated as paid/metered by default, including legacy rows loaded from SQLite.
+- Sources can also be explicitly marked as paid via `--costs-money`.
 - Dedupe is based on canonical URL first, then `(source_id, external_id)`.
 - Search is text-based over title, excerpt, and stored content text.
+- `laminar scan` skips paid sources by default unless `--include-paid` is passed.
+- `laminar scan` should continue after per-source failures, reporting reachable/unreachable status and coloring new items green, existing items cyan, failures red, and paid-source skips grey.
 
 ## Known Gaps
 
 - YouTube live feed support is not robust yet; some real channels return `404` from YouTube feed endpoints.
 - Semantic/vector search is not implemented yet.
-- Config is TOML today, even though future configs may move to YAML.
+- Config is YAML today.
 - Email generation and digest synthesis are out of scope for the current CLI.
 
 ## Guidance For Future Agents

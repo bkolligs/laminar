@@ -1,8 +1,9 @@
 import io
 import json
 from contextlib import redirect_stdout
-from urllib.error import HTTPError
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError
 from uuid import UUID
 
 import laminar.adapters as adapters
@@ -236,11 +237,21 @@ def test_scan_continues_after_source_failure_and_reports_item_statuses(
     original_build_adapter = cli.build_adapter
 
     class FailingAdapter:
-        def scan(self, source: SourceConfig) -> list[NormalizedItem]:
+        def scan(
+            self,
+            source: SourceConfig,
+            *,
+            since: datetime | None = None,
+        ) -> list[NormalizedItem]:
             raise HTTPError(source.feed_url or "", 404, "Not Found", hdrs=None, fp=None)
 
     class HealthyAdapter:
-        def scan(self, source: SourceConfig) -> list[NormalizedItem]:
+        def scan(
+            self,
+            source: SourceConfig,
+            *,
+            since: datetime | None = None,
+        ) -> list[NormalizedItem]:
             return [
                 NormalizedItem(
                     source_id=source.id,
@@ -314,7 +325,12 @@ def test_scan_skips_paid_sources_without_include_paid(tmp_path: Path) -> None:
     original_build_adapter = cli.build_adapter
 
     class FailingIfCalledAdapter:
-        def scan(self, source: SourceConfig) -> list[NormalizedItem]:
+        def scan(
+            self,
+            source: SourceConfig,
+            *,
+            since: datetime | None = None,
+        ) -> list[NormalizedItem]:
             raise AssertionError("paid source should have been skipped")
 
     def fake_build_adapter(source: SourceConfig):
@@ -334,6 +350,428 @@ def test_scan_skips_paid_sources_without_include_paid(tmp_path: Path) -> None:
     assert "Skipping paid-source (Paid X): paid source; rerun with --include-paid" in output
     assert "Scanning paid-source" not in output
     assert "scan complete: 0 items seen, 0 new, 0 failed, 1 skipped" in output
+
+
+def test_scan_uses_last_successful_scan_time_for_incremental_blog_and_youtube(
+    tmp_path: Path,
+) -> None:
+    blog_feed = tmp_path / "blog.xml"
+    blog_feed.write_text(
+        """
+        <rss version="2.0">
+          <channel>
+            <title>Example Blog</title>
+            <item>
+              <title>New Post</title>
+              <link>https://example.com/new-post</link>
+              <guid>post-2</guid>
+              <pubDate>Tue, 14 Apr 2026 13:00:00 +0000</pubDate>
+              <description>Fresh item.</description>
+            </item>
+            <item>
+              <title>Old Post</title>
+              <link>https://example.com/old-post</link>
+              <guid>post-1</guid>
+              <pubDate>Tue, 14 Apr 2026 12:00:00 +0000</pubDate>
+              <description>Existing item.</description>
+            </item>
+          </channel>
+        </rss>
+        """
+    )
+    yt_feed = tmp_path / "youtube.xml"
+    yt_feed.write_text(
+        """
+        <feed xmlns="http://www.w3.org/2005/Atom" xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+          <title>Example Channel</title>
+          <entry>
+            <yt:videoId>new123</yt:videoId>
+            <title>New Video</title>
+            <link rel="alternate" href="https://www.youtube.com/watch?v=new123"/>
+            <published>2026-04-14T13:00:00+00:00</published>
+            <author><name>Example Channel</name></author>
+          </entry>
+          <entry>
+            <yt:videoId>old123</yt:videoId>
+            <title>Old Video</title>
+            <link rel="alternate" href="https://www.youtube.com/watch?v=old123"/>
+            <published>2026-04-14T12:00:00+00:00</published>
+            <author><name>Example Channel</name></author>
+          </entry>
+        </feed>
+        """
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("database_path: laminar.db\n")
+    db_path = tmp_path / "laminar.db"
+    parser = build_parser()
+
+    original_fetch = adapters.fetch_transcript
+    fetch_calls: list[str] = []
+
+    def fake_fetch_transcript(
+        video_id_or_url: str,
+        languages: list[str] | None = None,
+    ) -> TranscriptResult:
+        fetch_calls.append(video_id_or_url)
+        return TranscriptResult(
+            text=f"transcript for {video_id_or_url}",
+            language_code="en",
+            language_name="English",
+            source="youtube_transcript_api_manual",
+            is_generated=False,
+            segments=[
+                TranscriptSegment(
+                    text=f"transcript for {video_id_or_url}",
+                    start=0.0,
+                    duration=1.0,
+                    timestamp="0:00",
+                )
+            ],
+        )
+
+    adapters.fetch_transcript = fake_fetch_transcript
+    try:
+        with redirect_stdout(io.StringIO()):
+            for args_list in (
+                [
+                    "--config",
+                    str(config_path),
+                    "--db",
+                    str(db_path),
+                    "source",
+                    "add",
+                    "--kind",
+                    "blog",
+                    "--label",
+                    "Example Blog",
+                    "--feed-url",
+                    blog_feed.as_uri(),
+                ],
+                [
+                    "--config",
+                    str(config_path),
+                    "--db",
+                    str(db_path),
+                    "source",
+                    "add",
+                    "--kind",
+                    "youtube",
+                    "--label",
+                    "Example Channel",
+                    "--feed-url",
+                    yt_feed.as_uri(),
+                    "--transcript-language",
+                    "en",
+                ],
+            ):
+                args = parser.parse_args(args_list)
+                assert run(args) == 0
+
+        repo = Repository(db_path)
+        sources_by_label = {source.label: source.id for source in repo.list_sources()}
+        cutoff = datetime(2026, 4, 14, 12, 30, tzinfo=timezone.utc)
+        blog_source_id = sources_by_label["Example Blog"]
+        youtube_source_id = sources_by_label["Example Channel"]
+        repo.mark_source_scan_succeeded(blog_source_id, cutoff)
+        repo.mark_source_scan_succeeded(youtube_source_id, cutoff)
+
+        scan_buffer = io.StringIO()
+        with redirect_stdout(scan_buffer):
+            args = parser.parse_args(["--config", str(config_path), "--db", str(db_path), "scan"])
+            assert run(args) == 0
+
+        output = scan_buffer.getvalue()
+        assert f"{blog_source_id}: new New Post" in output
+        assert f"{blog_source_id}: new Old Post" not in output
+        assert f"{youtube_source_id}: new New Video" in output
+        assert f"{youtube_source_id}: new Old Video" not in output
+        assert fetch_calls == ["new123"]
+    finally:
+        adapters.fetch_transcript = original_fetch
+
+
+def test_scan_filters_x_items_using_last_successful_scan_time(tmp_path: Path) -> None:
+    x_payload = tmp_path / "x.json"
+    x_payload.write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "id": "2",
+                        "author_id": "u1",
+                        "text": "new post",
+                        "created_at": "2026-04-14T13:00:00Z",
+                    },
+                    {
+                        "id": "1",
+                        "author_id": "u1",
+                        "text": "old post",
+                        "created_at": "2026-04-14T12:00:00Z",
+                    },
+                ],
+                "includes": {"users": [{"id": "u1", "username": "example"}]},
+            }
+        )
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("database_path: laminar.db\n")
+    db_path = tmp_path / "laminar.db"
+    parser = build_parser()
+
+    with redirect_stdout(io.StringIO()):
+        args = parser.parse_args(
+            [
+                "--config",
+                str(config_path),
+                "--db",
+                str(db_path),
+                "source",
+                "add",
+                "--kind",
+                "x",
+                "--label",
+                "Example X",
+                "--costs-money",
+                "--handle",
+                "example",
+                "--command",
+                "cat",
+                str(x_payload),
+            ]
+        )
+        assert run(args) == 0
+
+    repo = Repository(db_path)
+    source_id = next(source.id for source in repo.list_sources() if source.label == "Example X")
+    cutoff = datetime(2026, 4, 14, 12, 30, tzinfo=timezone.utc)
+    repo.mark_source_scan_succeeded(source_id, cutoff)
+
+    scan_buffer = io.StringIO()
+    with redirect_stdout(scan_buffer):
+        args = parser.parse_args(
+            ["--config", str(config_path), "--db", str(db_path), "scan", "--include-paid"]
+        )
+        assert run(args) == 0
+
+    output = scan_buffer.getvalue()
+    assert f"{source_id}: new new post" in output
+    assert f"{source_id}: new old post" not in output
+
+
+def test_scan_records_scan_start_as_success_watermark(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("database_path: laminar.db\n")
+    repo = Repository(db_path)
+    repo.upsert_source(
+        SourceConfig(
+            id="blog-source",
+            kind="blog",
+            label="Example Blog",
+            feed_url="https://example.com/feed.xml",
+        )
+    )
+    previous_scan_at = datetime(2026, 4, 14, 12, 0, tzinfo=timezone.utc)
+    repo.mark_source_scan_succeeded("blog-source", previous_scan_at)
+
+    original_build_adapter = cli.build_adapter
+    observed_since: list[datetime | None] = []
+    returned_item = NormalizedItem(
+        source_id="blog-source",
+        item_type="blog",
+        external_id="post-1",
+        canonical_url="https://example.com/post-1",
+        title="Published During Scan",
+        author="Author",
+        published_at=datetime(2026, 4, 14, 12, 5, tzinfo=timezone.utc),
+        excerpt="Excerpt",
+        content_text="Body",
+    )
+
+    class WatermarkAdapter:
+        def scan(
+            self,
+            source: SourceConfig,
+            *,
+            since: datetime | None = None,
+        ) -> list[NormalizedItem]:
+            observed_since.append(since)
+            return [returned_item]
+
+    def fake_build_adapter(source: SourceConfig):
+        if source.id == "blog-source":
+            return WatermarkAdapter()
+        return original_build_adapter(source)
+
+    cli.build_adapter = fake_build_adapter
+    try:
+        before_run = datetime.now(timezone.utc)
+        args = parser.parse_args(
+            ["--config", str(config_path), "--db", str(db_path), "scan"]
+        )
+        assert run(args) == 0
+        after_run = datetime.now(timezone.utc)
+    finally:
+        cli.build_adapter = original_build_adapter
+
+    assert observed_since == [previous_scan_at]
+    recorded_scan_at = repo.last_successful_scan_at("blog-source")
+    assert recorded_scan_at is not None
+    assert previous_scan_at <= recorded_scan_at
+    assert before_run <= recorded_scan_at <= after_run
+
+
+def test_scan_can_filter_by_source_kind(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    blog_source = SourceConfig(
+        id="blog-source",
+        kind="blog",
+        label="Example Blog",
+        feed_url="https://example.com/feed.xml",
+    )
+    youtube_source = SourceConfig(
+        id="youtube-source",
+        kind="youtube",
+        label="Example Channel",
+        feed_url="https://example.com/youtube.xml",
+        transcript_languages=["en"],
+    )
+    x_source = SourceConfig(
+        id="x-source",
+        kind="x",
+        label="Example X",
+        costs_money=True,
+        handle="example",
+        command=["unused"],
+    )
+    repo.upsert_source(blog_source)
+    repo.upsert_source(youtube_source)
+    repo.upsert_source(x_source)
+
+    original_build_adapter = cli.build_adapter
+
+    class StaticAdapter:
+        def __init__(self, title: str) -> None:
+            self.title = title
+
+        def scan(
+            self,
+            source: SourceConfig,
+            *,
+            since: datetime | None = None,
+        ) -> list[NormalizedItem]:
+            return [
+                NormalizedItem(
+                    source_id=source.id,
+                    item_type=(
+                        "blog"
+                        if source.kind == "blog"
+                        else "video"
+                        if source.kind == "youtube"
+                        else "x_post"
+                    ),
+                    external_id=f"{source.id}-1",
+                    canonical_url=f"https://example.com/{source.id}/1",
+                    title=self.title,
+                    author=source.label,
+                    published_at=None,
+                    excerpt=self.title,
+                    content_text=self.title,
+                )
+            ]
+
+    def fake_build_adapter(source: SourceConfig):
+        if source.id == "blog-source":
+            return StaticAdapter("Blog item")
+        if source.id == "youtube-source":
+            return StaticAdapter("YouTube item")
+        if source.id == "x-source":
+            return StaticAdapter("X item")
+        return original_build_adapter(source)
+
+    cli.build_adapter = fake_build_adapter
+    try:
+        with redirect_stdout(io.StringIO()) as buffer:
+            args = parser.parse_args(["--db", str(db_path), "scan", "--source", "youtube"])
+            assert run(args) == 0
+    finally:
+        cli.build_adapter = original_build_adapter
+
+    output = buffer.getvalue()
+    assert "Scanning youtube-source (Example Channel)" in output
+    assert "youtube-source: new YouTube item" in output
+    assert "Scanning blog-source" not in output
+    assert "Scanning x-source" not in output
+    assert "scan complete: 1 items seen, 1 new, 0 failed, 0 skipped" in output
+
+
+def test_scan_can_combine_source_kind_and_source_id_filters(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_source(
+        SourceConfig(
+            id="blog-source",
+            kind="blog",
+            label="Example Blog",
+            feed_url="https://example.com/feed.xml",
+        )
+    )
+    repo.upsert_source(
+        SourceConfig(
+            id="youtube-source",
+            kind="youtube",
+            label="Example Channel",
+            feed_url="https://example.com/youtube.xml",
+        )
+    )
+
+    original_build_adapter = cli.build_adapter
+
+    class StaticAdapter:
+        def scan(
+            self,
+            source: SourceConfig,
+            *,
+            since: datetime | None = None,
+        ) -> list[NormalizedItem]:
+            return [
+                NormalizedItem(
+                    source_id=source.id,
+                    item_type="video",
+                    external_id="item-1",
+                    canonical_url=f"https://example.com/{source.id}/1",
+                    title="Matched item",
+                    author=source.label,
+                    published_at=None,
+                    excerpt="Matched item",
+                    content_text="Matched item",
+                )
+            ]
+
+    def fake_build_adapter(source: SourceConfig):
+        if source.id in {"blog-source", "youtube-source"}:
+            return StaticAdapter()
+        return original_build_adapter(source)
+
+    cli.build_adapter = fake_build_adapter
+    try:
+        with redirect_stdout(io.StringIO()) as buffer:
+            args = parser.parse_args(
+                ["--db", str(db_path), "scan", "--source", "youtube", "blog-source"]
+            )
+            assert run(args) == 0
+    finally:
+        cli.build_adapter = original_build_adapter
+
+    output = buffer.getvalue()
+    assert "Scanning blog-source" not in output
+    assert "Scanning youtube-source" not in output
+    assert "scan complete: 0 items seen, 0 new, 0 failed, 0 skipped" in output
 
 
 def test_default_paths_live_under_home(monkeypatch, tmp_path: Path) -> None:
@@ -456,6 +894,53 @@ def test_x_sources_default_to_paid(tmp_path: Path) -> None:
     assert len(sources) == 1
     assert sources[0].kind == "x"
     assert sources[0].costs_money is True
+
+
+def test_scan_and_query_atom_blog_feed(tmp_path: Path) -> None:
+    atom_feed = tmp_path / "atom.xml"
+    atom_feed.write_text(
+        """
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <title>Example Atom Blog</title>
+          <entry>
+            <id>tag:example.com,2026:post-1</id>
+            <title>Atom Entry</title>
+            <link rel="alternate" href="https://example.com/atom-entry" />
+            <updated>2026-04-14T12:00:00Z</updated>
+            <author><name>Example Author</name></author>
+            <summary>Summary text</summary>
+            <content>Full content text</content>
+          </entry>
+        </feed>
+        """
+    )
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+
+    add_args = parser.parse_args(
+        [
+            "--db",
+            str(db_path),
+            "source",
+            "add",
+            "--kind",
+            "blog",
+            "--label",
+            "Example Atom Blog",
+            "--feed-url",
+            atom_feed.as_uri(),
+        ]
+    )
+    assert run(add_args) == 0
+
+    scan_args = parser.parse_args(["--db", str(db_path), "scan"])
+    assert run(scan_args) == 0
+
+    items = Repository(db_path).list_items(limit=10)
+    assert len(items) == 1
+    assert items[0].title == "Atom Entry"
+    assert items[0].canonical_url == "https://example.com/atom-entry"
+    assert items[0].content_text == "Full content text"
 
 
 def repo_source_id_from_db(db_path: Path) -> str:

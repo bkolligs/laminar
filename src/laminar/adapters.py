@@ -16,17 +16,42 @@ from laminar.youtube import (
 
 
 class Adapter(Protocol):
-    def scan(self, source: SourceConfig) -> list[NormalizedItem]: ...
+    def scan(
+        self,
+        source: SourceConfig,
+        *,
+        since: datetime | None = None,
+    ) -> list[NormalizedItem]: ...
 
 
 class BlogAdapter:
-    def scan(self, source: SourceConfig) -> list[NormalizedItem]:
+    def scan(
+        self,
+        source: SourceConfig,
+        *,
+        since: datetime | None = None,
+    ) -> list[NormalizedItem]:
         xml_text = fetch_text(source.feed_url or "")
         root = ElementTree.fromstring(xml_text)
+        if root.tag == "feed" or root.tag.endswith("}feed"):
+            return self._scan_atom(root, source, since=since)
+        return self._scan_rss(root, source, since=since)
+
+    def _scan_rss(
+        self,
+        root: ElementTree.Element,
+        source: SourceConfig,
+        *,
+        since: datetime | None = None,
+    ) -> list[NormalizedItem]:
         items: list[NormalizedItem] = []
         channel_title = _find_text(root, "./channel/title")
         for entry in root.findall("./channel/item"):
+            published_at = _parse_dt(_find_text(entry, "./pubDate"))
+            if since and published_at and published_at <= since:
+                break
             url = _find_text(entry, "./link")
+            description = _find_text(entry, "./description")
             items.append(
                 NormalizedItem(
                     source_id=source.id,
@@ -35,18 +60,64 @@ class BlogAdapter:
                     canonical_url=url,
                     title=_find_text(entry, "./title") or "(untitled blog post)",
                     author=_find_text(entry, "./author") or channel_title,
-                    published_at=_parse_dt(_find_text(entry, "./pubDate")),
-                    excerpt=_find_text(entry, "./description"),
-                    content_text=_find_text(entry, "./description"),
+                    published_at=published_at,
+                    excerpt=description,
+                    content_text=description,
                     content_source="rss",
                     raw_payload={"feed_label": channel_title},
                 )
             )
         return items
 
+    def _scan_atom(
+        self,
+        root: ElementTree.Element,
+        source: SourceConfig,
+        *,
+        since: datetime | None = None,
+    ) -> list[NormalizedItem]:
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        items: list[NormalizedItem] = []
+        feed_title = _find_text(root, "./atom:title", ns)
+        for entry in root.findall("./atom:entry", ns):
+            published_at = _parse_dt(
+                _find_text(entry, "./atom:published", ns)
+                or _find_text(entry, "./atom:updated", ns)
+            )
+            if since and published_at and published_at <= since:
+                break
+            url = _find_text(entry, "./atom:link[@rel='alternate']", ns, attr="href")
+            if url is None:
+                url = _find_text(entry, "./atom:link", ns, attr="href")
+            summary = _find_text(entry, "./atom:summary", ns)
+            content = _find_text(entry, "./atom:content", ns)
+            items.append(
+                NormalizedItem(
+                    source_id=source.id,
+                    item_type="blog",
+                    external_id=_find_text(entry, "./atom:id", ns) or url,
+                    canonical_url=url,
+                    title=_find_text(entry, "./atom:title", ns)
+                    or "(untitled blog post)",
+                    author=_find_text(entry, "./atom:author/atom:name", ns)
+                    or feed_title,
+                    published_at=published_at,
+                    excerpt=summary or content,
+                    content_text=content or summary,
+                    content_source="atom",
+                    raw_payload={"feed_label": feed_title},
+                )
+            )
+        return items
+
 
 class YouTubeAdapter:
-    def scan(self, source: SourceConfig) -> list[NormalizedItem]:
+    def scan(
+        self,
+        source: SourceConfig,
+        *,
+        since: datetime | None = None,
+    ) -> list[NormalizedItem]:
         xml_text = fetch_text(source.feed_url or "")
         root = ElementTree.fromstring(xml_text)
         ns = {
@@ -56,6 +127,9 @@ class YouTubeAdapter:
         channel_title = _find_text(root, "./atom:title", ns)
         items: list[NormalizedItem] = []
         for entry in root.findall("./atom:entry", ns):
+            published_at = _parse_dt(_find_text(entry, "./atom:published", ns))
+            if since and published_at and published_at <= since:
+                break
             video_url = _find_text(
                 entry, "./atom:link[@rel='alternate']", ns, attr="href"
             )
@@ -100,7 +174,7 @@ class YouTubeAdapter:
                     title=_find_text(entry, "./atom:title", ns) or "(untitled video)",
                     author=_find_text(entry, "./atom:author/atom:name", ns)
                     or channel_title,
-                    published_at=_parse_dt(_find_text(entry, "./atom:published", ns)),
+                    published_at=published_at,
                     excerpt=_find_text(entry, "./atom:group/atom:description", ns)
                     or _find_text(entry, "./atom:title", ns),
                     content_text=transcript_text,
@@ -119,7 +193,12 @@ class YouTubeAdapter:
 
 
 class XAdapter:
-    def scan(self, source: SourceConfig) -> list[NormalizedItem]:
+    def scan(
+        self,
+        source: SourceConfig,
+        *,
+        since: datetime | None = None,
+    ) -> list[NormalizedItem]:
         payload = _run_x_command(source)
         data = json.loads(payload)
         tweets = data.get("data") if isinstance(data, dict) else data
@@ -150,6 +229,9 @@ class XAdapter:
             if username and tweet_id:
                 canonical_url = f"https://x.com/{username}/status/{tweet_id}"
             text = tweet.get("text")
+            published_at = _parse_dt(tweet.get("created_at"))
+            if since and published_at and published_at <= since:
+                continue
             items.append(
                 NormalizedItem(
                     source_id=source.id,
@@ -158,7 +240,7 @@ class XAdapter:
                     canonical_url=canonical_url,
                     title=_title_from_text(text),
                     author=username,
-                    published_at=_parse_dt(tweet.get("created_at")),
+                    published_at=published_at,
                     excerpt=text,
                     content_text=text,
                     content_source="x_api",

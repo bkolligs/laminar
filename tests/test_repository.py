@@ -68,6 +68,41 @@ def test_adds_costs_money_column_for_existing_databases(tmp_path: Path) -> None:
     assert sources[0].costs_money is True
 
 
+def test_adds_last_successful_scan_column_for_existing_databases(tmp_path: Path) -> None:
+    db_path = tmp_path / "laminar.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE sources (
+            source_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            label TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            costs_money INTEGER NOT NULL DEFAULT 0,
+            provider TEXT,
+            feed_url TEXT,
+            handle TEXT,
+            command_json TEXT NOT NULL DEFAULT '[]',
+            transcript_languages_json TEXT NOT NULL DEFAULT '[]',
+            poll_interval_minutes INTEGER,
+            metadata_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    repo = Repository(db_path)
+
+    with repo.connect() as conn:
+        columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
+        }
+
+    assert "last_successful_scan_at" in columns
+
+
 def test_x_sources_are_treated_as_paid_when_loading_legacy_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "laminar.db"
     repo = Repository(db_path)
@@ -100,6 +135,16 @@ def test_x_sources_are_treated_as_paid_when_loading_legacy_rows(tmp_path: Path) 
     assert len(sources) == 1
     assert sources[0].kind == "x"
     assert sources[0].costs_money is True
+
+
+def test_records_last_successful_scan_time(tmp_path: Path) -> None:
+    repo = Repository(tmp_path / "laminar.db")
+    repo.upsert_source(SourceConfig(id="blog-1", kind="blog", label="Example Blog"))
+
+    scanned_at = datetime(2026, 4, 14, 18, 30, tzinfo=timezone.utc)
+    repo.mark_source_scan_succeeded("blog-1", scanned_at)
+
+    assert repo.last_successful_scan_at("blog-1") == scanned_at
 
 
 def test_dedupes_by_canonical_url(tmp_path: Path) -> None:
@@ -135,6 +180,42 @@ def test_dedupes_by_canonical_url(tmp_path: Path) -> None:
     assert inserted_second is False
     assert len(items) == 1
     assert items[0].title == "Updated title"
+
+
+def test_refreshes_canonical_url_when_existing_item_is_updated(tmp_path: Path) -> None:
+    repo = Repository(tmp_path / "laminar.db")
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="x-1",
+            item_type="x_post",
+            external_id="tweet-1",
+            canonical_url=None,
+            title="Initial title",
+            author="example",
+            published_at=datetime(2026, 4, 14, tzinfo=timezone.utc),
+            excerpt="One",
+            content_text="One",
+        )
+    )
+
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="x-1",
+            item_type="x_post",
+            external_id="tweet-1",
+            canonical_url="https://x.com/example/status/tweet-1",
+            title="Initial title",
+            author="example",
+            published_at=datetime(2026, 4, 14, tzinfo=timezone.utc),
+            excerpt="One",
+            content_text="One",
+        )
+    )
+
+    items = repo.list_items(limit=10)
+
+    assert len(items) == 1
+    assert items[0].canonical_url == "https://x.com/example/status/tweet-1"
 
 
 def test_search_uses_content_text(tmp_path: Path) -> None:

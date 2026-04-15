@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -86,6 +87,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Include sources marked as paid or metered.",
     )
+    scan_parser.add_argument(
+        "--source",
+        dest="source_kinds",
+        action="append",
+        choices=["blog", "youtube", "x"],
+        default=[],
+        help="Limit scan to one or more source kinds.",
+    )
     scan_parser.add_argument("source_ids", nargs="*")
 
     items_parser = subparsers.add_parser("items")
@@ -166,10 +175,13 @@ def _run_scan(args: argparse.Namespace) -> int:
     console = _console()
     sources = repo.list_sources()
     selected = {source_id for source_id in args.source_ids}
+    selected_kinds = set(args.source_kinds)
     active_sources = [
         source
         for source in sources
-        if source.enabled and (not selected or source.id in selected)
+        if source.enabled
+        and (not selected or source.id in selected)
+        and (not selected_kinds or source.kind in selected_kinds)
     ]
 
     total_seen = 0
@@ -184,6 +196,7 @@ def _run_scan(args: argparse.Namespace) -> int:
             )
             total_skipped += 1
             continue
+        scan_started_at = datetime.now(timezone.utc)
         scan_id = repo.start_scan(source.id)
         console.print(f"Scanning {source.id} ({source.label})")
         if source.costs_money:
@@ -193,7 +206,8 @@ def _run_scan(args: argparse.Namespace) -> int:
             )
         try:
             adapter = build_adapter(source)
-            items = adapter.scan(source)
+            previous_scan_at = repo.last_successful_scan_at(source.id)
+            items = adapter.scan(source, since=previous_scan_at)
             console.print(f"{source.id}: reachable", style="green")
             new_count = 0
             for item in items:
@@ -205,6 +219,7 @@ def _run_scan(args: argparse.Namespace) -> int:
             repo.finish_scan(
                 scan_id, status="success", items_seen=len(items), items_new=new_count
             )
+            repo.mark_source_scan_succeeded(source.id, scan_started_at)
             total_seen += len(items)
             total_new += new_count
         except Exception as exc:
