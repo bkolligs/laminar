@@ -1,40 +1,42 @@
 # Laminar
 
+![Laminar logo](assets/laminar-logo.png)
+
 Laminar is a local-first CLI for ingesting updates from blogs, YouTube channels, and X accounts into SQLite for deterministic retrieval by a downstream agent.
+
+By default, Laminar keeps its state under `~/.laminar/`:
+- `~/.laminar/laminar.db`
+- `~/.laminar/config.yaml`
 
 ## Quick Start
 
 ```bash
 uv sync
-uv run laminar source validate --config laminar.toml
-uv run laminar scan --config laminar.toml
-uv run laminar items list --db laminar.db
+uv run laminar source validate
+uv run laminar source add --kind blog --label "Example Blog" --feed-url https://example.com/feed.xml
+uv run laminar scan
+uv run laminar items list
 ```
 
 ## Config
 
-Laminar uses TOML config with one `[[sources]]` entry per feed.
+Laminar stores source definitions in SQLite. `config.yaml` is now behavior-only and currently controls the database location. Running `laminar source validate` on a fresh install will create `config.yaml` if it does not exist.
 
-```toml
-[[sources]]
-id = "example-blog"
-kind = "blog"
-label = "Example Blog"
-enabled = true
-feed_url = "https://example.com/feed.xml"
-
-[[sources]]
-id = "example-youtube"
-kind = "youtube"
-label = "Example Channel"
-enabled = true
-feed_url = "https://www.youtube.com/feeds/videos.xml?channel_id=..."
-transcript_languages = ["en"]
-
-[[sources]]
-id = "example-x"
-kind = "x"
-label = "Example on X"
-enabled = true
-command = ["xurl", "https://api.x.com/2/..."]
+```yaml
+database_path: laminar.db
 ```
+
+Add sources through the CLI:
+
+```bash
+uv run laminar source add --kind blog --label "Example Blog" --feed-url https://example.com/feed.xml
+uv run laminar source add --kind youtube --label "Example Channel" --feed-url "https://www.youtube.com/feeds/videos.xml?channel_id=..." --transcript-language en
+uv run laminar source add --kind x --label "Example on X" --command xurl https://api.x.com/2/...
+uv run laminar source list
+uv run laminar scan --include-paid
+uv run laminar scan --source youtube
+```
+
+X sources are treated as paid by default. Use `--costs-money` for any other source backed by a paid or metered API. Paid sources are skipped by default during `scan`; pass `--include-paid` when you want to scan them.
+
+`laminar scan` stores the last successful scan time for each source and uses it as an incremental cutoff on later runs. Blog and YouTube feed scans assume reverse-chronological ordering and stop once they reach older entries; X scans currently still invoke the configured command and then filter out items at or before the last successful scan time locally.
