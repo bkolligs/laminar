@@ -15,7 +15,7 @@ def default_state_dir() -> Path:
 
 
 def default_config_path() -> Path:
-    return default_state_dir() / "config.toml"
+    return default_state_dir() / "config.yaml"
 
 
 def default_db_path() -> Path:

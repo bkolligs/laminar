@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
+
+import yaml
 
 from laminar.models import SourceConfig
 
@@ -15,16 +16,22 @@ def load_config(path: str | Path) -> list[SourceConfig]:
     if not config_path.exists():
         raise ConfigError(f"Config file not found: {config_path}")
 
-    data = tomllib.loads(config_path.read_text())
+    try:
+        data = yaml.safe_load(config_path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"Invalid YAML: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError("Config must be a mapping with a top-level 'sources' key")
+
     raw_sources = data.get("sources")
     if not isinstance(raw_sources, list) or not raw_sources:
-        raise ConfigError("Config must define at least one [[sources]] entry")
+        raise ConfigError("Config must define at least one source entry under 'sources'")
 
     sources: list[SourceConfig] = []
     seen_ids: set[str] = set()
     for index, raw_source in enumerate(raw_sources, start=1):
         if not isinstance(raw_source, dict):
-            raise ConfigError(f"Source entry #{index} must be a table")
+            raise ConfigError(f"Source entry #{index} must be a mapping")
 
         source_id = _require_str(raw_source, "id")
         if source_id in seen_ids:

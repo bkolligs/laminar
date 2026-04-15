@@ -4,7 +4,7 @@ Laminar is a local-first CLI for ingesting updates from blogs, YouTube channels,
 
 By default, Laminar keeps its state under `~/.laminar/`:
 - `~/.laminar/laminar.db`
-- `~/.laminar/config.toml`
+- `~/.laminar/config.yaml`
 
 ## Quick Start
 
@@ -18,28 +18,27 @@ uv run laminar items list
 
 ## Config
 
-Laminar uses TOML config with one `[[sources]]` entry per feed. The default config path is `~/.laminar/config.toml`.
+Laminar uses YAML config with one entry per feed under `sources`. The default config path is `~/.laminar/config.yaml`.
 
-```toml
-[[sources]]
-id = "example-blog"
-kind = "blog"
-label = "Example Blog"
-enabled = true
-feed_url = "https://example.com/feed.xml"
-
-[[sources]]
-id = "example-youtube"
-kind = "youtube"
-label = "Example Channel"
-enabled = true
-feed_url = "https://www.youtube.com/feeds/videos.xml?channel_id=..."
-transcript_languages = ["en"]
-
-[[sources]]
-id = "example-x"
-kind = "x"
-label = "Example on X"
-enabled = true
-command = ["xurl", "https://api.x.com/2/..."]
+```yaml
+sources:
+  - id: example-blog
+    kind: blog
+    label: Example Blog
+    enabled: true
+    feed_url: https://example.com/feed.xml
+  - id: example-youtube
+    kind: youtube
+    label: Example Channel
+    enabled: true
+    feed_url: https://www.youtube.com/feeds/videos.xml?channel_id=...
+    transcript_languages:
+      - en
+  - id: example-x
+    kind: x
+    label: Example on X
+    enabled: true
+    command:
+      - xurl
+      - https://api.x.com/2/...
 ```

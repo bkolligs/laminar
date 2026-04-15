@@ -6,21 +6,21 @@ from laminar.config import ConfigError, load_config
 
 
 def test_load_config(tmp_path: Path) -> None:
-    path = tmp_path / "laminar.toml"
+    path = tmp_path / "laminar.yaml"
     path.write_text(
         """
-        [[sources]]
-        id = "blog-1"
-        kind = "blog"
-        label = "Example Blog"
-        enabled = true
-        feed_url = "file:///tmp/feed.xml"
-
-        [[sources]]
-        id = "x-1"
-        kind = "x"
-        label = "Example X"
-        command = ["xurl", "https://api.x.test"]
+        sources:
+          - id: blog-1
+            kind: blog
+            label: Example Blog
+            enabled: true
+            feed_url: file:///tmp/feed.xml
+          - id: x-1
+            kind: x
+            label: Example X
+            command:
+              - xurl
+              - https://api.x.test
         """
     )
 
@@ -31,20 +31,18 @@ def test_load_config(tmp_path: Path) -> None:
 
 
 def test_rejects_duplicate_ids(tmp_path: Path) -> None:
-    path = tmp_path / "laminar.toml"
+    path = tmp_path / "laminar.yaml"
     path.write_text(
         """
-        [[sources]]
-        id = "dup"
-        kind = "blog"
-        label = "One"
-        feed_url = "file:///tmp/feed.xml"
-
-        [[sources]]
-        id = "dup"
-        kind = "youtube"
-        label = "Two"
-        feed_url = "file:///tmp/feed.xml"
+        sources:
+          - id: dup
+            kind: blog
+            label: One
+            feed_url: file:///tmp/feed.xml
+          - id: dup
+            kind: youtube
+            label: Two
+            feed_url: file:///tmp/feed.xml
         """
     )
 

@@ -1,32 +1,12 @@
-from pathlib import Path
-
-from laminar.youtube import fetch_transcript_from_watch_url
+from laminar.youtube import extract_video_id, format_timestamp
 
 
-def test_fetch_transcript_from_fixture_watch_page(tmp_path: Path) -> None:
-    transcript_path = tmp_path / "transcript.xml"
-    transcript_path.write_text(
-        """
-        <transcript>
-          <text start="0" dur="1">hello world</text>
-          <text start="1" dur="1">second line</text>
-        </transcript>
-        """
-    )
-    watch_path = tmp_path / "watch.html"
-    watch_path.write_text(
-        (
-            'ytInitialPlayerResponse = {"captions":{"playerCaptionsTracklistRenderer":'
-            '{"captionTracks":[{"baseUrl":"%s","languageCode":"en"}]}}};'
-        )
-        % transcript_path.as_uri()
-    )
+def test_extract_video_id_from_urls() -> None:
+    assert extract_video_id("https://www.youtube.com/watch?v=EBw7gsDPAYQ") == "EBw7gsDPAYQ"
+    assert extract_video_id("https://youtu.be/EBw7gsDPAYQ") == "EBw7gsDPAYQ"
 
-    transcript, language, source = fetch_transcript_from_watch_url(
-        watch_path.as_uri(),
-        ["en"],
-    )
 
-    assert transcript == "hello world\nsecond line"
-    assert language == "en"
-    assert source == "youtube_captions"
+def test_format_timestamp() -> None:
+    assert format_timestamp(0) == "0:00"
+    assert format_timestamp(75) == "1:15"
+    assert format_timestamp(3670) == "1:01:10"

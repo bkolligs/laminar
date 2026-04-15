@@ -11,7 +11,7 @@ from laminar.models import NormalizedItem, SourceConfig
 from laminar.youtube import (
     TranscriptUnavailable,
     extract_video_id,
-    fetch_transcript_from_watch_url,
+    fetch_transcript,
 )
 
 
@@ -66,14 +66,27 @@ class YouTubeAdapter:
             transcript_status = "missing"
             transcript_language = None
             transcript_source = None
+            transcript_segments: list[dict[str, object]] = []
+            transcript_is_generated = None
             if video_url and video_id:
                 try:
-                    transcript_text, transcript_language, transcript_source = (
-                        fetch_transcript_from_watch_url(
-                            video_url,
-                            source.transcript_languages,
-                        )
+                    transcript = fetch_transcript(
+                        video_id,
+                        source.transcript_languages,
                     )
+                    transcript_text = transcript.text
+                    transcript_language = transcript.language_code
+                    transcript_source = transcript.source
+                    transcript_is_generated = transcript.is_generated
+                    transcript_segments = [
+                        {
+                            "text": segment.text,
+                            "start": segment.start,
+                            "duration": segment.duration,
+                            "timestamp": segment.timestamp,
+                        }
+                        for segment in transcript.segments
+                    ]
                     transcript_status = "available"
                 except TranscriptUnavailable:
                     transcript_status = "missing"
@@ -94,7 +107,12 @@ class YouTubeAdapter:
                     content_status=transcript_status,
                     content_language=transcript_language,
                     content_source=transcript_source,
-                    raw_payload={"video_id": video_id, "channel_title": channel_title},
+                    raw_payload={
+                        "video_id": video_id,
+                        "channel_title": channel_title,
+                        "transcript_is_generated": transcript_is_generated,
+                        "transcript_segments": transcript_segments,
+                    },
                 )
             )
         return items
