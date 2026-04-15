@@ -2,18 +2,23 @@
 
 Laminar is a local-first CLI for ingesting updates from blogs, YouTube channels, and X accounts into SQLite for deterministic retrieval by a downstream agent.
 
+By default, Laminar keeps its state under `~/.laminar/`:
+- `~/.laminar/laminar.db`
+- `~/.laminar/config.toml`
+
 ## Quick Start
 
 ```bash
 uv sync
-uv run laminar source validate --config laminar.toml
-uv run laminar scan --config laminar.toml
-uv run laminar items list --db laminar.db
+mkdir -p ~/.laminar
+uv run laminar source validate
+uv run laminar scan
+uv run laminar items list
 ```
 
 ## Config
 
-Laminar uses TOML config with one `[[sources]]` entry per feed.
+Laminar uses TOML config with one `[[sources]]` entry per feed. The default config path is `~/.laminar/config.toml`.
 
 ```toml
 [[sources]]
