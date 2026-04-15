@@ -46,6 +46,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--db",
         help="Path to SQLite database. Overrides database_path in config.yaml.",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="global_verbose",
+        action="store_true",
+        help="Show detailed scan and ingest logging.",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -92,9 +99,16 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser = subparsers.add_parser("scan")
     scan_parser.set_defaults(command="scan")
     scan_parser.add_argument(
+        "-i",
         "--include-paid",
         action="store_true",
         help="Include sources marked as paid or metered.",
+    )
+    scan_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show detailed scan and ingest logging.",
     )
     scan_parser.add_argument(
         "--source",
@@ -204,6 +218,12 @@ def _run_scan(args: argparse.Namespace) -> int:
     runtime = _load_runtime(args)
     repo = Repository(runtime.database_path)
     console = _console()
+    verbose = bool(getattr(args, "verbose", False) or getattr(args, "global_verbose", False))
+
+    def verbose_print(message: str) -> None:
+        if verbose:
+            console.print(message, style="dim", soft_wrap=True)
+
     sources = repo.list_sources()
     selected = {source_id for source_id in args.source_ids}
     selected_kinds = set(args.source_kinds)
@@ -219,6 +239,9 @@ def _run_scan(args: argparse.Namespace) -> int:
     total_new = 0
     total_failed = 0
     total_skipped = 0
+    verbose_print(
+        f"scan configuration: {len(active_sources)} active sources, include_paid={args.include_paid}, selected_kinds={sorted(selected_kinds) or ['all']}, selected_ids={sorted(selected) or ['all']}"
+    )
     for source in active_sources:
         if source.costs_money and not args.include_paid:
             console.print(
@@ -238,7 +261,20 @@ def _run_scan(args: argparse.Namespace) -> int:
         try:
             adapter = build_adapter(source)
             previous_scan_at = repo.last_successful_scan_at(source.id)
-            items = adapter.scan(source, since=previous_scan_at)
+            if previous_scan_at is None:
+                verbose_print(f"{source.id}: no previous successful scan; ingesting all available items")
+            else:
+                verbose_print(
+                    f"{source.id}: incremental cutoff is {previous_scan_at.isoformat()}"
+                )
+            items = adapter.scan(
+                source,
+                since=previous_scan_at,
+                verbose=verbose_print,
+            )
+            verbose_print(
+                f"{source.id}: adapter returned {len(items)} items after cutoff filtering"
+            )
             console.print(f"{source.id}: reachable", style="green")
             new_count = 0
             for item in items:
@@ -251,6 +287,9 @@ def _run_scan(args: argparse.Namespace) -> int:
                 scan_id, status="success", items_seen=len(items), items_new=new_count
             )
             repo.mark_source_scan_succeeded(source.id, scan_started_at)
+            verbose_print(
+                f"{source.id}: marked successful scan watermark at {scan_started_at.isoformat()}"
+            )
             total_seen += len(items)
             total_new += new_count
         except Exception as exc:

@@ -38,6 +38,7 @@ uv run laminar source remove --recursive SOURCE_ID
 uv run laminar items remove ITEM_ID
 uv run laminar source list
 uv run laminar scan --include-paid
+uv run laminar scan -i -v
 uv run laminar scan --source youtube
 ```
 
@@ -48,5 +49,7 @@ For `--kind x`, Laminar can either run an explicit `--command` or resolve `--fee
 `laminar source remove` deletes the source definition and its scan history. Pass `--recursive` if you also want to delete all items already ingested from that source.
 
 `laminar items remove` deletes a single stored item and its associated stored content. Like `items show`, it accepts an exact item ID, a unique item ID prefix, or a unique title.
+
+Pass `-v` or `--verbose` to `laminar scan` when you want detailed progress logging, including the active incremental cutoff and when older entries are skipped because they are at or before that watermark. Use `-i` or `--include-paid` to include paid sources.
 
 `laminar scan` stores the last successful scan time for each source and uses it as an incremental cutoff on later runs. Blog and YouTube feed scans assume reverse-chronological ordering and stop once they reach older entries; X scans currently still invoke the configured command or resolved `xurl` target and then filter out items at or before the last successful scan time locally.

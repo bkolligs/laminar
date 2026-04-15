@@ -243,6 +243,7 @@ def test_scan_continues_after_source_failure_and_reports_item_statuses(
             source: SourceConfig,
             *,
             since: datetime | None = None,
+            verbose=None,
         ) -> list[NormalizedItem]:
             raise HTTPError(source.feed_url or "", 404, "Not Found", hdrs=None, fp=None)
 
@@ -252,6 +253,7 @@ def test_scan_continues_after_source_failure_and_reports_item_statuses(
             source: SourceConfig,
             *,
             since: datetime | None = None,
+            verbose=None,
         ) -> list[NormalizedItem]:
             return [
                 NormalizedItem(
@@ -331,6 +333,7 @@ def test_scan_skips_paid_sources_without_include_paid(tmp_path: Path) -> None:
             source: SourceConfig,
             *,
             since: datetime | None = None,
+            verbose=None,
         ) -> list[NormalizedItem]:
             raise AssertionError("paid source should have been skipped")
 
@@ -560,6 +563,134 @@ def test_scan_filters_x_items_using_last_successful_scan_time(tmp_path: Path) ->
     assert f"{source_id}: new old post" not in output
 
 
+def test_scan_verbose_reports_incremental_cutoffs_and_skipped_items(
+    tmp_path: Path,
+) -> None:
+    blog_feed = tmp_path / "blog.xml"
+    blog_feed.write_text(
+        """
+        <rss version="2.0">
+          <channel>
+            <title>Example Blog</title>
+            <item>
+              <title>New Post</title>
+              <link>https://example.com/new-post</link>
+              <guid>post-2</guid>
+              <pubDate>Tue, 14 Apr 2026 13:00:00 +0000</pubDate>
+              <description>Fresh item.</description>
+            </item>
+            <item>
+              <title>Old Post</title>
+              <link>https://example.com/old-post</link>
+              <guid>post-1</guid>
+              <pubDate>Tue, 14 Apr 2026 12:00:00 +0000</pubDate>
+              <description>Existing item.</description>
+            </item>
+          </channel>
+        </rss>
+        """
+    )
+    x_payload = tmp_path / "x.json"
+    x_payload.write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "id": "2",
+                        "author_id": "u1",
+                        "text": "new post",
+                        "created_at": "2026-04-14T13:00:00Z",
+                    },
+                    {
+                        "id": "1",
+                        "author_id": "u1",
+                        "text": "old post",
+                        "created_at": "2026-04-14T12:00:00Z",
+                    },
+                ],
+                "includes": {"users": [{"id": "u1", "username": "example"}]},
+            }
+        )
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("database_path: laminar.db\n")
+    db_path = tmp_path / "laminar.db"
+    parser = build_parser()
+
+    with redirect_stdout(io.StringIO()):
+        for args_list in (
+            [
+                "--config",
+                str(config_path),
+                "--db",
+                str(db_path),
+                "source",
+                "add",
+                "--kind",
+                "blog",
+                "--label",
+                "Example Blog",
+                "--feed-url",
+                blog_feed.as_uri(),
+            ],
+            [
+                "--config",
+                str(config_path),
+                "--db",
+                str(db_path),
+                "source",
+                "add",
+                "--kind",
+                "x",
+                "--label",
+                "Example X",
+                "--costs-money",
+                "--handle",
+                "example",
+                "--command",
+                "cat",
+                str(x_payload),
+            ],
+        ):
+            args = parser.parse_args(args_list)
+            assert run(args) == 0
+
+    repo = Repository(db_path)
+    sources_by_label = {source.label: source.id for source in repo.list_sources()}
+    cutoff = datetime(2026, 4, 14, 12, 30, tzinfo=timezone.utc)
+    repo.mark_source_scan_succeeded(sources_by_label["Example Blog"], cutoff)
+    repo.mark_source_scan_succeeded(sources_by_label["Example X"], cutoff)
+
+    scan_buffer = io.StringIO()
+    with redirect_stdout(scan_buffer):
+        args = parser.parse_args(
+            [
+                "--config",
+                str(config_path),
+                "--db",
+                str(db_path),
+                "--verbose",
+                "scan",
+                "--include-paid",
+            ]
+        )
+        assert run(args) == 0
+
+    output = scan_buffer.getvalue()
+    blog_source_id = sources_by_label["Example Blog"]
+    x_source_id = sources_by_label["Example X"]
+    assert f"{blog_source_id}: incremental cutoff is 2026-04-14T12:30:00+00:00" in output
+    assert (
+        f"{blog_source_id}: stopping rss scan at 2026-04-14T12:00:00+00:00 because it is at or before cutoff 2026-04-14T12:30:00+00:00"
+        in output
+    )
+    assert f"{x_source_id}: x payload yielded 2 candidate posts before cutoff filtering" in output
+    assert (
+        f"{x_source_id}: skipping x post 1 from 2026-04-14T12:00:00+00:00 because it is at or before cutoff 2026-04-14T12:30:00+00:00"
+        in output
+    )
+
+
 def test_scan_records_scan_start_as_success_watermark(tmp_path: Path) -> None:
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
@@ -597,6 +728,7 @@ def test_scan_records_scan_start_as_success_watermark(tmp_path: Path) -> None:
             source: SourceConfig,
             *,
             since: datetime | None = None,
+            verbose=None,
         ) -> list[NormalizedItem]:
             observed_since.append(since)
             return [returned_item]
@@ -664,6 +796,7 @@ def test_scan_can_filter_by_source_kind(tmp_path: Path) -> None:
             source: SourceConfig,
             *,
             since: datetime | None = None,
+            verbose=None,
         ) -> list[NormalizedItem]:
             return [
                 NormalizedItem(
@@ -739,6 +872,7 @@ def test_scan_can_combine_source_kind_and_source_id_filters(tmp_path: Path) -> N
             source: SourceConfig,
             *,
             since: datetime | None = None,
+            verbose=None,
         ) -> list[NormalizedItem]:
             return [
                 NormalizedItem(
@@ -783,6 +917,26 @@ def test_default_paths_live_under_home(monkeypatch, tmp_path: Path) -> None:
 
     assert args.config == str(tmp_path / ".laminar" / "config.yaml")
     assert args.db is None
+
+
+def test_scan_short_flags_enable_include_paid_and_verbose() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["scan", "-i", "-v"])
+
+    assert args.include_paid is True
+    assert args.verbose is True
+    assert args.global_verbose is False
+
+
+def test_global_verbose_flag_survives_scan_subparser_defaults() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["-v", "scan", "-i"])
+
+    assert args.include_paid is True
+    assert args.global_verbose is True
+    assert args.verbose is False
 
 
 def test_source_validate_creates_default_config(tmp_path: Path) -> None:

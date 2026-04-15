@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Callable, Protocol
 from urllib.parse import parse_qsl, urlencode, urlparse
 from xml.etree import ElementTree
 
@@ -22,6 +22,7 @@ class Adapter(Protocol):
         source: SourceConfig,
         *,
         since: datetime | None = None,
+        verbose: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]: ...
 
 
@@ -31,12 +32,13 @@ class BlogAdapter:
         source: SourceConfig,
         *,
         since: datetime | None = None,
+        verbose: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]:
         xml_text = fetch_text(source.feed_url or "")
         root = ElementTree.fromstring(xml_text)
         if root.tag == "feed" or root.tag.endswith("}feed"):
-            return self._scan_atom(root, source, since=since)
-        return self._scan_rss(root, source, since=since)
+            return self._scan_atom(root, source, since=since, verbose=verbose)
+        return self._scan_rss(root, source, since=since, verbose=verbose)
 
     def _scan_rss(
         self,
@@ -44,12 +46,17 @@ class BlogAdapter:
         source: SourceConfig,
         *,
         since: datetime | None = None,
+        verbose: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]:
         items: list[NormalizedItem] = []
         channel_title = _find_text(root, "./channel/title")
         for entry in root.findall("./channel/item"):
             published_at = _parse_dt(_find_text(entry, "./pubDate"))
             if since and published_at and published_at <= since:
+                _verbose_log(
+                    verbose,
+                    f"{source.id}: stopping rss scan at {_display_dt(published_at)} because it is at or before cutoff {_display_dt(since)}",
+                )
                 break
             url = _find_text(entry, "./link")
             description = _find_text(entry, "./description")
@@ -76,6 +83,7 @@ class BlogAdapter:
         source: SourceConfig,
         *,
         since: datetime | None = None,
+        verbose: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]:
         ns = {"atom": "http://www.w3.org/2005/Atom"}
         items: list[NormalizedItem] = []
@@ -86,6 +94,10 @@ class BlogAdapter:
                 or _find_text(entry, "./atom:updated", ns)
             )
             if since and published_at and published_at <= since:
+                _verbose_log(
+                    verbose,
+                    f"{source.id}: stopping atom scan at {_display_dt(published_at)} because it is at or before cutoff {_display_dt(since)}",
+                )
                 break
             url = _find_text(entry, "./atom:link[@rel='alternate']", ns, attr="href")
             if url is None:
@@ -118,6 +130,7 @@ class YouTubeAdapter:
         source: SourceConfig,
         *,
         since: datetime | None = None,
+        verbose: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]:
         xml_text = fetch_text(source.feed_url or "")
         root = ElementTree.fromstring(xml_text)
@@ -130,6 +143,10 @@ class YouTubeAdapter:
         for entry in root.findall("./atom:entry", ns):
             published_at = _parse_dt(_find_text(entry, "./atom:published", ns))
             if since and published_at and published_at <= since:
+                _verbose_log(
+                    verbose,
+                    f"{source.id}: stopping youtube scan at {_display_dt(published_at)} because it is at or before cutoff {_display_dt(since)}",
+                )
                 break
             video_url = _find_text(
                 entry, "./atom:link[@rel='alternate']", ns, attr="href"
@@ -163,8 +180,16 @@ class YouTubeAdapter:
                         for segment in transcript.segments
                     ]
                     transcript_status = "available"
+                    _verbose_log(
+                        verbose,
+                        f"{source.id}: transcript available for {video_id} in {transcript_language or 'unknown language'} via {transcript_source or 'unknown source'}",
+                    )
                 except TranscriptUnavailable:
                     transcript_status = "missing"
+                    _verbose_log(
+                        verbose,
+                        f"{source.id}: transcript missing for {video_id}",
+                    )
 
             items.append(
                 NormalizedItem(
@@ -199,14 +224,19 @@ class XAdapter:
         source: SourceConfig,
         *,
         since: datetime | None = None,
+        verbose: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]:
-        payload = _run_x_command(source)
+        payload = _run_x_command(source, verbose=verbose)
         data = json.loads(payload)
         tweets = _extract_x_tweets(data)
         if tweets is None:
             raise ValueError(
                 f"Source {source.id}: x payload must contain tweet-like objects"
             )
+        _verbose_log(
+            verbose,
+            f"{source.id}: x payload yielded {len(tweets)} candidate posts before cutoff filtering",
+        )
 
         users = _extract_x_users(data)
 
@@ -218,6 +248,10 @@ class XAdapter:
             text = _tweet_text(tweet)
             published_at = _parse_dt(_tweet_created_at(tweet))
             if since and published_at and published_at <= since:
+                _verbose_log(
+                    verbose,
+                    f"{source.id}: skipping x post {tweet_id or '(unknown id)'} from {_display_dt(published_at)} because it is at or before cutoff {_display_dt(since)}",
+                )
                 continue
             items.append(
                 NormalizedItem(
@@ -280,7 +314,11 @@ def _parse_dt(value: str | None) -> datetime | None:
     return None
 
 
-def _run_x_command(source: SourceConfig) -> str:
+def _run_x_command(
+    source: SourceConfig,
+    *,
+    verbose: Callable[[str], None] | None = None,
+) -> str:
     command = source.command[:]
     if not command:
         if source.feed_url:
@@ -290,6 +328,7 @@ def _run_x_command(source: SourceConfig) -> str:
             if not isinstance(api_url, str) or not api_url:
                 raise ValueError(f"Source {source.id}: missing x command target")
             command = ["xurl", api_url]
+    _verbose_log(verbose, f"{source.id}: running x command {' '.join(command)}")
 
     result = subprocess.run(
         command,
@@ -455,3 +494,17 @@ def _coerce_x_tweets(value: list[object]) -> list[dict[str, object]]:
         if isinstance(item, dict) and _looks_like_x_tweet(item):
             tweets.append(item)
     return tweets
+
+
+def _verbose_log(
+    verbose: Callable[[str], None] | None,
+    message: str,
+) -> None:
+    if verbose is not None:
+        verbose(message)
+
+
+def _display_dt(value: datetime | None) -> str:
+    if value is None:
+        return "(unknown time)"
+    return value.isoformat()
