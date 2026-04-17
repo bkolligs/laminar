@@ -5,7 +5,6 @@ import pytest
 from laminar.config import (
     ConfigError,
     ensure_default_config,
-    normalize_source_kind,
     validate_source,
 )
 from laminar.models import SourceConfig
@@ -40,15 +39,11 @@ def test_x_sources_can_validate_with_feed_url() -> None:
     validate_source(source)
 
 
-def test_x_sources_still_require_a_command_or_url() -> None:
+def test_x_sources_still_require_a_url_or_api_url() -> None:
     source = SourceConfig(id="x-empty", kind="x", label="Broken X")
 
     with pytest.raises(
         ConfigError,
-        match="x sources require command, feed_url, or api_url",
+        match="x sources require feed_url or api_url",
     ):
         validate_source(source)
-
-
-def test_normalizes_legacy_blog_kind_to_feed() -> None:
-    assert normalize_source_kind("blog") == "feed"

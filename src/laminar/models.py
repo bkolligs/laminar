@@ -21,12 +21,9 @@ class SourceConfig:
     label: str
     enabled: bool = True
     costs_money: bool = False
-    provider: str | None = None
     feed_url: str | None = None
     handle: str | None = None
-    command: list[str] = field(default_factory=list)
     transcript_languages: list[str] = field(default_factory=list)
-    poll_interval_minutes: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     last_successful_scan_at: datetime | None = None
 

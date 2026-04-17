@@ -5,6 +5,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from laminar.adapters import build_adapter
@@ -12,7 +13,6 @@ from laminar.config import (
     AppConfig,
     ConfigError,
     ensure_default_config,
-    normalize_source_kind,
     validate_source,
 )
 from laminar.models import SourceConfig
@@ -66,21 +66,44 @@ def build_parser() -> argparse.ArgumentParser:
     show_source = source_subparsers.add_parser("show")
     show_source.add_argument("source_id")
 
-    add_source = source_subparsers.add_parser("add")
-    add_source.add_argument("--kind", required=True, choices=["feed", "youtube", "x"])
-    add_source.add_argument("--label", required=True)
-    add_source.add_argument("--provider")
-    add_source.add_argument("--feed-url")
-    add_source.add_argument("--handle")
-    add_source.add_argument("--command", dest="source_exec", nargs="+")
-    add_source.add_argument("--transcript-language", action="append", default=[])
-    add_source.add_argument("--poll-interval-minutes", type=int)
-    add_source.add_argument(
-        "--costs-money",
-        action="store_true",
-        help="Mark this source as using a paid or metered integration.",
+    add_source = source_subparsers.add_parser(
+        "add",
+        help="Add a source by URL.",
+        description="Add a source by URL. Feed is the default type.",
     )
-    add_source.add_argument("--disable", action="store_true")
+    add_source.add_argument(
+        "url",
+        metavar="URL",
+        help="Source URL to ingest. For X, use a profile or list URL.",
+    )
+    add_source.add_argument(
+        "--type",
+        dest="kind",
+        default=None,
+        choices=["feed", "youtube", "x"],
+        help="Source type. When omitted, inferred from the URL: X URLs become x, YouTube URLs become youtube, otherwise feed.",
+    )
+    add_source.add_argument(
+        "--name",
+        required=True,
+        help="Human-friendly name shown in source listings and scan output.",
+    )
+    add_source.add_argument(
+        "--transcript-language",
+        action="append",
+        default=[],
+        help="Preferred transcript language for YouTube sources. Repeat to try more than one. Defaults to en.",
+    )
+    add_source.add_argument(
+        "--paid",
+        action="store_true",
+        help="Mark this source as using a paid or metered integration. X sources are paid by default.",
+    )
+    add_source.add_argument(
+        "--disable",
+        action="store_true",
+        help="Save the source in a disabled state so scans skip it.",
+    )
     add_source.add_argument(
         "--metadata",
         action="append",
@@ -210,12 +233,9 @@ def _run_source(args: argparse.Namespace) -> int:
             "label": source.label,
             "enabled": source.enabled,
             "costs_money": source.costs_money,
-            "provider": source.provider,
             "feed_url": source.feed_url,
             "handle": source.handle,
-            "command": source.command,
             "transcript_languages": source.transcript_languages,
-            "poll_interval_minutes": source.poll_interval_minutes,
             "metadata": source.metadata,
             "last_successful_scan_at": (
                 source.last_successful_scan_at.isoformat()
@@ -265,7 +285,7 @@ def _run_scan(args: argparse.Namespace) -> int:
 
     sources = repo.list_sources()
     selected = {source_id for source_id in args.source_ids}
-    selected_kinds = {normalize_source_kind(kind) for kind in args.source_kinds}
+    selected_kinds = set(args.source_kinds)
     active_sources = [
         source
         for source in sources
@@ -273,7 +293,7 @@ def _run_scan(args: argparse.Namespace) -> int:
         and (not selected or source.id in selected)
         and (
             not selected_kinds
-            or normalize_source_kind(source.kind) in selected_kinds
+            or source.kind in selected_kinds
         )
     ]
 
@@ -507,19 +527,22 @@ def _load_runtime(args: argparse.Namespace) -> AppConfig:
 
 
 def _build_source_from_args(args: argparse.Namespace) -> SourceConfig:
-    costs_money = args.costs_money or args.kind == "x"
+    feed_url = args.url
+    kind = _resolve_source_kind(feed_url, args.kind)
+    normalized_kind = kind
+    costs_money = args.paid or normalized_kind == "x"
+    transcript_languages = args.transcript_language
+    if normalized_kind == "youtube" and not transcript_languages:
+        transcript_languages = ["en"]
     return SourceConfig(
         id=str(uuid4()),
-        kind=normalize_source_kind(args.kind),
-        label=args.label,
+        kind=normalized_kind,
+        label=args.name,
         enabled=not args.disable,
         costs_money=costs_money,
-        provider=args.provider,
-        feed_url=args.feed_url,
-        handle=args.handle,
-        command=args.source_exec or [],
-        transcript_languages=args.transcript_language,
-        poll_interval_minutes=args.poll_interval_minutes,
+        feed_url=feed_url,
+        handle=_infer_x_handle(feed_url, normalized_kind),
+        transcript_languages=transcript_languages,
         metadata=_parse_metadata(args.metadata),
     )
 
@@ -536,6 +559,30 @@ def _parse_metadata(pairs: list[str]) -> dict[str, object]:
             raise ConfigError(f"Metadata entries must be KEY=VALUE pairs: {pair}")
         metadata[key] = value
     return metadata
+
+
+def _resolve_source_kind(url: str, explicit_kind: str | None) -> str:
+    if explicit_kind is not None:
+        return explicit_kind
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if host.endswith("x.com"):
+        return "x"
+    if host.endswith("youtube.com") or host == "youtu.be":
+        return "youtube"
+    return "feed"
+
+
+def _infer_x_handle(url: str, kind: str) -> str | None:
+    if kind != "x":
+        return None
+    parsed = urlparse(url)
+    if not parsed.netloc.endswith("x.com"):
+        return None
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if not path_parts or "lists" in path_parts:
+        return None
+    return path_parts[0]
 
 
 def _resolve_item(repo: Repository, item_ref: str):

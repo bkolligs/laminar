@@ -21,11 +21,6 @@ class AppConfig:
     config_path: Path
     database_path: Path
 
-
-def normalize_source_kind(kind: str) -> str:
-    return "feed" if kind == "blog" else kind
-
-
 def ensure_default_config(path: str | Path) -> AppConfig:
     config_path = Path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,22 +35,15 @@ def ensure_default_config(path: str | Path) -> AppConfig:
 
 
 def validate_source(source: SourceConfig) -> None:
-    kind = normalize_source_kind(source.kind)
+    kind = source.kind
     if kind not in {"feed", "youtube", "x"}:
         raise ConfigError(f"Source {source.id}: unsupported kind {source.kind!r}")
 
     if kind in {"feed", "youtube"} and not source.feed_url:
         raise ConfigError(f"Source {source.id}: {kind} sources require feed_url")
 
-    if (
-        kind == "x"
-        and not source.command
-        and not source.feed_url
-        and not source.metadata.get("api_url")
-    ):
-        raise ConfigError(
-            f"Source {source.id}: x sources require command, feed_url, or api_url"
-        )
+    if kind == "x" and not source.feed_url and not source.metadata.get("api_url"):
+        raise ConfigError(f"Source {source.id}: x sources require feed_url or api_url")
 
 
 def _load_yaml_mapping(path: Path, *, label: str) -> dict[str, object]:

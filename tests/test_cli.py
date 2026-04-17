@@ -100,8 +100,16 @@ def test_scan_and_query(tmp_path: Path) -> None:
         )
 
     adapters.fetch_transcript = fake_fetch_transcript
-    with redirect_stdout(io.StringIO()):
-        for args_list in (
+    original_run = adapters.subprocess.run
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command == ["xurl", "https://x.com/example"]
+        return subprocess.CompletedProcess(command, 0, stdout=x_payload.read_text(), stderr="")
+
+    adapters.subprocess.run = fake_run
+    try:
+        with redirect_stdout(io.StringIO()):
+            for args_list in (
             [
                 "--config",
                 str(config_path),
@@ -109,11 +117,8 @@ def test_scan_and_query(tmp_path: Path) -> None:
                 str(db_path),
                 "source",
                 "add",
-                "--kind",
-                "feed",
-                "--label",
+                "--name",
                 "Example Feed",
-                "--feed-url",
                 blog_feed.as_uri(),
             ],
             [
@@ -123,11 +128,10 @@ def test_scan_and_query(tmp_path: Path) -> None:
                 str(db_path),
                 "source",
                 "add",
-                "--kind",
+                "--type",
                 "youtube",
-                "--label",
+                "--name",
                 "Example Channel",
-                "--feed-url",
                 yt_feed.as_uri(),
                 "--transcript-language",
                 "en",
@@ -139,16 +143,12 @@ def test_scan_and_query(tmp_path: Path) -> None:
                 str(db_path),
                 "source",
                 "add",
-                "--kind",
+                "--type",
                 "x",
-                "--label",
+                "--name",
                 "Example X",
-                "--costs-money",
-                "--handle",
-                "example",
-                "--command",
-                "cat",
-                str(x_payload),
+                "--paid",
+                "https://x.com/example",
             ],
             [
                 "--config",
@@ -159,10 +159,12 @@ def test_scan_and_query(tmp_path: Path) -> None:
                 "validate",
             ],
             ["--config", str(config_path), "--db", str(db_path), "scan"],
-        ):
-            args = parser.parse_args(args_list)
-            assert run(args) == 0
-    adapters.fetch_transcript = original_fetch
+            ):
+                args = parser.parse_args(args_list)
+                assert run(args) == 0
+    finally:
+        adapters.fetch_transcript = original_fetch
+        adapters.subprocess.run = original_run
 
     list_buffer = io.StringIO()
     with redirect_stdout(list_buffer):
@@ -284,7 +286,7 @@ def test_scan_continues_after_source_failure_and_reports_item_statuses(
         label="Healthy Feed",
         costs_money=True,
         handle="healthy",
-        command=["unused"],
+        feed_url="https://x.com/healthy",
     )
     repo.upsert_source(failing)
     repo.upsert_source(healthy)
@@ -388,7 +390,7 @@ def test_scan_skips_paid_sources_without_include_paid(tmp_path: Path) -> None:
             label="Paid X",
             costs_money=True,
             handle="example",
-            command=["unused"],
+            feed_url="https://x.com/example",
         )
     )
 
@@ -506,35 +508,31 @@ def test_scan_uses_last_successful_scan_time_for_incremental_blog_and_youtube(
         with redirect_stdout(io.StringIO()):
             for args_list in (
                 [
-                    "--config",
-                    str(config_path),
-                    "--db",
-                    str(db_path),
-                    "source",
-                    "add",
-                    "--kind",
-                    "feed",
-                    "--label",
-                    "Example Feed",
-                    "--feed-url",
-                    blog_feed.as_uri(),
-                ],
-                [
-                    "--config",
-                    str(config_path),
-                    "--db",
-                    str(db_path),
-                    "source",
-                    "add",
-                    "--kind",
-                    "youtube",
-                    "--label",
-                    "Example Channel",
-                    "--feed-url",
-                    yt_feed.as_uri(),
-                    "--transcript-language",
-                    "en",
-                ],
+                "--config",
+                str(config_path),
+                "--db",
+                str(db_path),
+                "source",
+                "add",
+                "--name",
+                "Example Feed",
+                blog_feed.as_uri(),
+            ],
+            [
+                "--config",
+                str(config_path),
+                "--db",
+                str(db_path),
+                "source",
+                "add",
+                "--type",
+                "youtube",
+                "--name",
+                "Example Channel",
+                yt_feed.as_uri(),
+                "--transcript-language",
+                "en",
+            ],
             ):
                 args = parser.parse_args(args_list)
                 assert run(args) == 0
@@ -599,16 +597,12 @@ def test_scan_filters_x_items_using_last_successful_scan_time(tmp_path: Path) ->
                 str(db_path),
                 "source",
                 "add",
-                "--kind",
+                "--type",
                 "x",
-                "--label",
+                "--name",
                 "Example X",
-                "--costs-money",
-                "--handle",
-                "example",
-                "--command",
-                "cat",
-                str(x_payload),
+                "--paid",
+                "https://x.com/example",
             ]
         )
         assert run(args) == 0
@@ -618,12 +612,22 @@ def test_scan_filters_x_items_using_last_successful_scan_time(tmp_path: Path) ->
     cutoff = datetime(2026, 4, 14, 12, 30, tzinfo=timezone.utc)
     repo.mark_source_scan_succeeded(source_id, cutoff)
 
-    scan_buffer = io.StringIO()
-    with redirect_stdout(scan_buffer):
-        args = parser.parse_args(
-            ["--config", str(config_path), "--db", str(db_path), "scan", "--include-paid"]
-        )
-        assert run(args) == 0
+    original_run = adapters.subprocess.run
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command == ["xurl", "https://x.com/example"]
+        return subprocess.CompletedProcess(command, 0, stdout=x_payload.read_text(), stderr="")
+
+    adapters.subprocess.run = fake_run
+    try:
+        scan_buffer = io.StringIO()
+        with redirect_stdout(scan_buffer):
+            args = parser.parse_args(
+                ["--config", str(config_path), "--db", str(db_path), "scan", "--include-paid"]
+            )
+            assert run(args) == 0
+    finally:
+        adapters.subprocess.run = original_run
 
     output = scan_buffer.getvalue()
     assert f"{source_id}: new new post" in output
@@ -693,11 +697,8 @@ def test_scan_verbose_reports_incremental_cutoffs_and_skipped_items(
                 str(db_path),
                 "source",
                 "add",
-                "--kind",
-                "feed",
-                "--label",
+                "--name",
                 "Example Feed",
-                "--feed-url",
                 blog_feed.as_uri(),
             ],
             [
@@ -707,16 +708,12 @@ def test_scan_verbose_reports_incremental_cutoffs_and_skipped_items(
                 str(db_path),
                 "source",
                 "add",
-                "--kind",
+                "--type",
                 "x",
-                "--label",
+                "--name",
                 "Example X",
-                "--costs-money",
-                "--handle",
-                "example",
-                "--command",
-                "cat",
-                str(x_payload),
+                "--paid",
+                "https://x.com/example",
             ],
         ):
             args = parser.parse_args(args_list)
@@ -728,20 +725,30 @@ def test_scan_verbose_reports_incremental_cutoffs_and_skipped_items(
     repo.mark_source_scan_succeeded(sources_by_label["Example Feed"], cutoff)
     repo.mark_source_scan_succeeded(sources_by_label["Example X"], cutoff)
 
-    scan_buffer = io.StringIO()
-    with redirect_stdout(scan_buffer):
-        args = parser.parse_args(
-            [
-                "--config",
-                str(config_path),
-                "--db",
-                str(db_path),
-                "--verbose",
-                "scan",
-                "--include-paid",
-            ]
-        )
-        assert run(args) == 0
+    original_run = adapters.subprocess.run
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command == ["xurl", "https://x.com/example"]
+        return subprocess.CompletedProcess(command, 0, stdout=x_payload.read_text(), stderr="")
+
+    adapters.subprocess.run = fake_run
+    try:
+        scan_buffer = io.StringIO()
+        with redirect_stdout(scan_buffer):
+            args = parser.parse_args(
+                [
+                    "--config",
+                    str(config_path),
+                    "--db",
+                    str(db_path),
+                    "--verbose",
+                    "scan",
+                    "--include-paid",
+                ]
+            )
+            assert run(args) == 0
+    finally:
+        adapters.subprocess.run = original_run
 
     output = scan_buffer.getvalue()
     blog_source_id = sources_by_label["Example Feed"]
@@ -846,7 +853,7 @@ def test_scan_can_filter_by_source_kind(tmp_path: Path) -> None:
         label="Example X",
         costs_money=True,
         handle="example",
-        command=["unused"],
+        feed_url="https://x.com/example",
     )
     repo.upsert_source(blog_source)
     repo.upsert_source(youtube_source)
@@ -1031,11 +1038,8 @@ def test_source_list_reads_sources_from_database(tmp_path: Path) -> None:
             str(db_path),
             "source",
             "add",
-            "--kind",
-            "feed",
-            "--label",
+            "--name",
             "Example Feed",
-            "--feed-url",
             "file:///tmp/feed.xml",
         ]
     )
@@ -1064,16 +1068,12 @@ def test_source_list_shows_paid_sources(tmp_path: Path) -> None:
             str(db_path),
             "source",
             "add",
-            "--kind",
+            "--type",
             "x",
-            "--label",
+            "--name",
             "Paid X",
-            "--costs-money",
-            "--handle",
-            "example",
-            "--command",
-            "echo",
-            "[]",
+            "--paid",
+            "https://x.com/example",
         ]
     )
     assert run(add_args) == 0
@@ -1097,15 +1097,9 @@ def test_x_sources_default_to_paid(tmp_path: Path) -> None:
             str(db_path),
             "source",
             "add",
-            "--kind",
-            "x",
-            "--label",
+            "--name",
             "Default Paid X",
-            "--handle",
-            "example",
-            "--command",
-            "echo",
-            "[]",
+            "https://x.com/example",
         ]
     )
     assert run(add_args) == 0
@@ -1116,6 +1110,101 @@ def test_x_sources_default_to_paid(tmp_path: Path) -> None:
     assert len(sources) == 1
     assert sources[0].kind == "x"
     assert sources[0].costs_money is True
+
+
+def test_x_profile_urls_infer_handle(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+
+    add_args = parser.parse_args(
+        [
+            "--db",
+            str(db_path),
+            "source",
+            "add",
+            "--name",
+            "Example X",
+            "https://x.com/example",
+        ]
+    )
+    assert run(add_args) == 0
+
+    sources = Repository(db_path).list_sources()
+    assert len(sources) == 1
+    assert sources[0].handle == "example"
+
+
+def test_youtube_urls_infer_youtube_kind(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+
+    add_args = parser.parse_args(
+        [
+            "--db",
+            str(db_path),
+            "source",
+            "add",
+            "--name",
+            "Example Channel",
+            "https://www.youtube.com/feeds/videos.xml?channel_id=abc123",
+        ]
+    )
+    assert run(add_args) == 0
+
+    sources = Repository(db_path).list_sources()
+    assert len(sources) == 1
+    assert sources[0].kind == "youtube"
+    assert sources[0].transcript_languages == ["en"]
+
+
+def test_youtube_sources_default_transcript_language_to_english(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+
+    add_args = parser.parse_args(
+        [
+            "--db",
+            str(db_path),
+            "source",
+            "add",
+            "--type",
+            "youtube",
+            "--name",
+            "Example Channel",
+            "https://www.youtube.com/feeds/videos.xml?channel_id=abc123",
+        ]
+    )
+    assert run(add_args) == 0
+
+    sources = Repository(db_path).list_sources()
+    assert len(sources) == 1
+    assert sources[0].transcript_languages == ["en"]
+
+
+def test_explicit_type_overrides_url_inference(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+
+    add_args = parser.parse_args(
+        [
+            "--db",
+            str(db_path),
+            "source",
+            "add",
+            "--type",
+            "feed",
+            "--name",
+            "Forced Feed",
+            "https://x.com/example",
+        ]
+    )
+    assert run(add_args) == 0
+
+    sources = Repository(db_path).list_sources()
+    assert len(sources) == 1
+    assert sources[0].kind == "feed"
+    assert sources[0].costs_money is False
+    assert sources[0].handle is None
 
 
 def test_x_list_sources_use_xurl_and_store_list_contents(tmp_path: Path) -> None:
@@ -1133,11 +1222,10 @@ def test_x_list_sources_use_xurl_and_store_list_contents(tmp_path: Path) -> None
             str(db_path),
             "source",
             "add",
-            "--kind",
+            "--type",
             "x",
-            "--label",
+            "--name",
             "AI List",
-            "--feed-url",
             list_url,
         ]
     )
@@ -1190,6 +1278,32 @@ def test_x_list_browser_url_is_translated_to_list_tweets_api_target() -> None:
         "/2/lists/9876543210/tweets"
         "?expansions=author_id&max_results=100&tweet.fields=created_at&user.fields=username"
     )
+
+
+def test_source_add_help_uses_url_type_and_paid_flags(capsys) -> None:
+    parser = build_parser()
+
+    try:
+        parser.parse_args(["source", "add", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    captured = capsys.readouterr()
+    help_text = captured.out
+    assert "URL" in help_text
+    assert "--name" in help_text
+    assert "--type" in help_text
+    assert "--paid" in help_text
+    assert "inferred from the URL" in help_text
+    assert "Defaults to en." in help_text
+    assert "{feed,youtube,x}" in help_text
+    assert "blog" not in help_text
+    assert "--label" not in help_text
+    assert "--kind" not in help_text
+    assert "--feed-url" not in help_text
+    assert "--command" not in help_text
+    assert "--costs-money" not in help_text
+    assert "--handle" not in help_text
 
 
 def test_source_remove_deletes_source_without_items(tmp_path: Path) -> None:
@@ -1294,11 +1408,8 @@ def test_scan_and_query_atom_blog_feed(tmp_path: Path) -> None:
             str(db_path),
             "source",
             "add",
-            "--kind",
-            "feed",
-            "--label",
+            "--name",
             "Example Atom Feed",
-            "--feed-url",
             atom_feed.as_uri(),
         ]
     )

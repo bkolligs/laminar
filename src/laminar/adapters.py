@@ -7,7 +7,6 @@ from typing import Callable, Protocol
 from urllib.parse import parse_qsl, urlencode, urlparse
 from xml.etree import ElementTree
 
-from laminar.config import normalize_source_kind
 from laminar.fetch import fetch_text
 from laminar.models import NormalizedItem, SourceConfig
 from laminar.youtube import (
@@ -273,7 +272,7 @@ class XAdapter:
 
 
 def build_adapter(source: SourceConfig) -> Adapter:
-    kind = normalize_source_kind(source.kind)
+    kind = source.kind
     if kind == "feed":
         return FeedAdapter()
     if kind == "youtube":
@@ -321,15 +320,13 @@ def _run_x_command(
     *,
     verbose: Callable[[str], None] | None = None,
 ) -> str:
-    command = source.command[:]
-    if not command:
-        if source.feed_url:
-            command = ["xurl", _x_command_target(source.feed_url)]
-        else:
-            api_url = source.metadata.get("api_url")
-            if not isinstance(api_url, str) or not api_url:
-                raise ValueError(f"Source {source.id}: missing x command target")
-            command = ["xurl", api_url]
+    if source.feed_url:
+        command = ["xurl", _x_command_target(source.feed_url)]
+    else:
+        api_url = source.metadata.get("api_url")
+        if not isinstance(api_url, str) or not api_url:
+            raise ValueError(f"Source {source.id}: missing x command target")
+        command = ["xurl", api_url]
     _verbose_log(verbose, f"{source.id}: running x command {' '.join(command)}")
 
     result = subprocess.run(

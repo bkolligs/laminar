@@ -19,9 +19,7 @@ def test_persists_source_config_round_trip(tmp_path: Path) -> None:
             enabled=False,
             costs_money=True,
             feed_url="https://www.youtube.com/feeds/videos.xml?channel_id=123",
-            command=["unused"],
             transcript_languages=["en", "es"],
-            poll_interval_minutes=30,
             metadata={"region": "us"},
         )
     )
@@ -33,7 +31,6 @@ def test_persists_source_config_round_trip(tmp_path: Path) -> None:
     assert sources[0].enabled is False
     assert sources[0].costs_money is True
     assert sources[0].transcript_languages == ["en", "es"]
-    assert sources[0].poll_interval_minutes == 30
     assert sources[0].metadata["region"] == "us"
 
 
@@ -47,12 +44,9 @@ def test_adds_costs_money_column_for_existing_databases(tmp_path: Path) -> None:
             kind TEXT NOT NULL,
             label TEXT NOT NULL,
             enabled INTEGER NOT NULL,
-            provider TEXT,
             feed_url TEXT,
             handle TEXT,
-            command_json TEXT NOT NULL DEFAULT '[]',
             transcript_languages_json TEXT NOT NULL DEFAULT '[]',
-            poll_interval_minutes INTEGER,
             metadata_json TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -81,12 +75,9 @@ def test_adds_last_successful_scan_column_for_existing_databases(tmp_path: Path)
             label TEXT NOT NULL,
             enabled INTEGER NOT NULL,
             costs_money INTEGER NOT NULL DEFAULT 0,
-            provider TEXT,
             feed_url TEXT,
             handle TEXT,
-            command_json TEXT NOT NULL DEFAULT '[]',
             transcript_languages_json TEXT NOT NULL DEFAULT '[]',
-            poll_interval_minutes INTEGER,
             metadata_json TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -105,71 +96,159 @@ def test_adds_last_successful_scan_column_for_existing_databases(tmp_path: Path)
     assert "last_successful_scan_at" in columns
 
 
+def test_migrates_sources_table_to_clean_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "laminar.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE sources (
+            source_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            label TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            provider TEXT,
+            feed_url TEXT,
+            handle TEXT,
+            command_json TEXT NOT NULL DEFAULT '[]',
+            transcript_languages_json TEXT NOT NULL DEFAULT '[]',
+            poll_interval_minutes INTEGER,
+            metadata_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO sources (
+            source_id, kind, label, enabled, provider, feed_url, handle,
+            command_json, transcript_languages_json, poll_interval_minutes, metadata_json
+        ) VALUES (
+            'yt-1', 'youtube', 'Example Channel', 1, 'youtube',
+            'https://www.youtube.com/feeds/videos.xml?channel_id=123', '@example',
+            '["unused"]', '["en"]', 30, '{"region":"us"}'
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    repo = Repository(db_path)
+
+    with repo.connect() as conn:
+        columns = [
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
+        ]
+
+    assert columns == [
+        "source_id",
+        "kind",
+        "label",
+        "enabled",
+        "costs_money",
+        "feed_url",
+        "handle",
+        "transcript_languages_json",
+        "metadata_json",
+        "last_successful_scan_at",
+        "updated_at",
+    ]
+
+    source = repo.get_source("yt-1")
+    assert source is not None
+    assert source.kind == "youtube"
+    assert source.label == "Example Channel"
+    assert source.enabled is True
+    assert source.costs_money is False
+    assert source.feed_url == "https://www.youtube.com/feeds/videos.xml?channel_id=123"
+    assert source.handle == "@example"
+    assert source.transcript_languages == ["en"]
+    assert source.metadata == {"region": "us"}
+
+
 def test_x_sources_are_treated_as_paid_when_loading_legacy_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "laminar.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE sources (
+            source_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            label TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            costs_money INTEGER NOT NULL DEFAULT 0,
+            feed_url TEXT,
+            handle TEXT,
+            transcript_languages_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL,
+            last_successful_scan_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO sources (
+            source_id, kind, label, enabled, costs_money, feed_url, handle,
+            transcript_languages_json, metadata_json
+        ) VALUES (
+            'x-legacy', 'x', 'Jeremy Howard', 1, 0, NULL, 'jeremyphoward', '[]', '{}'
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
     repo = Repository(db_path)
-    with repo.connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO sources (
-                source_id, kind, label, enabled, costs_money, provider, feed_url, handle,
-                command_json, transcript_languages_json, poll_interval_minutes, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "x-legacy",
-                "x",
-                "Jeremy Howard",
-                1,
-                0,
-                None,
-                None,
-                "jeremyphoward",
-                "[]",
-                "[]",
-                None,
-                "{}",
-            ),
-        )
 
     sources = repo.list_sources()
 
     assert len(sources) == 1
     assert sources[0].kind == "x"
     assert sources[0].costs_money is True
+    with repo.connect() as conn:
+        stored = conn.execute(
+            "SELECT kind, costs_money FROM sources WHERE source_id = ?",
+            ("x-legacy",),
+        ).fetchone()
+    assert stored is not None
+    assert stored["kind"] == "x"
+    assert stored["costs_money"] == 1
 
 
 def test_legacy_blog_sources_load_as_feed(tmp_path: Path) -> None:
     db_path = tmp_path / "laminar.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE sources (
+            source_id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            label TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            costs_money INTEGER NOT NULL DEFAULT 0,
+            feed_url TEXT,
+            handle TEXT,
+            transcript_languages_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL,
+            last_successful_scan_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO sources (
+            source_id, kind, label, enabled, costs_money, feed_url, handle,
+            transcript_languages_json, metadata_json
+        ) VALUES (
+            'blog-legacy', 'blog', 'Legacy Blog', 1, 0, 'https://example.com/feed.xml', NULL, '[]', '{}'
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
     repo = Repository(db_path)
-    with repo.connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO sources (
-                source_id, kind, label, enabled, costs_money, provider, feed_url, handle,
-                command_json, transcript_languages_json, poll_interval_minutes, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "blog-legacy",
-                "blog",
-                "Legacy Blog",
-                1,
-                0,
-                None,
-                "https://example.com/feed.xml",
-                None,
-                "[]",
-                "[]",
-                None,
-                "{}",
-            ),
-        )
 
     sources = repo.list_sources()
 
     assert len(sources) == 1
     assert sources[0].kind == "feed"
+    with repo.connect() as conn:
+        stored = conn.execute(
+            "SELECT kind FROM sources WHERE source_id = ?",
+            ("blog-legacy",),
+        ).fetchone()
+    assert stored is not None
+    assert stored["kind"] == "feed"
 
 
 def test_records_last_successful_scan_time(tmp_path: Path) -> None:
@@ -192,12 +271,9 @@ def test_get_source_returns_full_source_details(tmp_path: Path) -> None:
             label="Example Channel",
             enabled=False,
             costs_money=True,
-            provider="youtube",
             feed_url="https://www.youtube.com/feeds/videos.xml?channel_id=123",
             handle="@example",
-            command=["yt-dlp", "--flat-playlist"],
             transcript_languages=["en", "es"],
-            poll_interval_minutes=30,
             metadata={"region": "us"},
         )
     )
@@ -210,12 +286,9 @@ def test_get_source_returns_full_source_details(tmp_path: Path) -> None:
     assert source.label == "Example Channel"
     assert source.enabled is False
     assert source.costs_money is True
-    assert source.provider == "youtube"
     assert source.feed_url == "https://www.youtube.com/feeds/videos.xml?channel_id=123"
     assert source.handle == "@example"
-    assert source.command == ["yt-dlp", "--flat-playlist"]
     assert source.transcript_languages == ["en", "es"]
-    assert source.poll_interval_minutes == 30
     assert source.metadata == {"region": "us"}
     assert source.last_successful_scan_at == scanned_at
 

@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from laminar.config import normalize_source_kind
 from laminar.models import (
     NormalizedItem,
     RepositoryStats,
@@ -24,12 +23,9 @@ CREATE TABLE IF NOT EXISTS sources (
     label TEXT NOT NULL,
     enabled INTEGER NOT NULL,
     costs_money INTEGER NOT NULL DEFAULT 0,
-    provider TEXT,
     feed_url TEXT,
     handle TEXT,
-    command_json TEXT NOT NULL DEFAULT '[]',
     transcript_languages_json TEXT NOT NULL DEFAULT '[]',
-    poll_interval_minutes INTEGER,
     metadata_json TEXT NOT NULL,
     last_successful_scan_at TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -87,6 +83,20 @@ CREATE INDEX IF NOT EXISTS idx_item_title_map_title
 ON item_title_map(title);
 """
 
+SOURCE_COLUMNS = [
+    "source_id",
+    "kind",
+    "label",
+    "enabled",
+    "costs_money",
+    "feed_url",
+    "handle",
+    "transcript_languages_json",
+    "metadata_json",
+    "last_successful_scan_at",
+    "updated_at",
+]
+
 
 class Repository:
     def __init__(self, db_path: str | Path) -> None:
@@ -111,21 +121,18 @@ class Repository:
             conn.execute(
                 """
                 INSERT INTO sources (
-                    source_id, kind, label, enabled, costs_money, provider, feed_url, handle,
-                    command_json, transcript_languages_json, poll_interval_minutes, metadata_json,
+                    source_id, kind, label, enabled, costs_money, feed_url, handle,
+                    transcript_languages_json, metadata_json,
                     last_successful_scan_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
                     kind = excluded.kind,
                     label = excluded.label,
                     enabled = excluded.enabled,
                     costs_money = excluded.costs_money,
-                    provider = excluded.provider,
                     feed_url = excluded.feed_url,
                     handle = excluded.handle,
-                    command_json = excluded.command_json,
                     transcript_languages_json = excluded.transcript_languages_json,
-                    poll_interval_minutes = excluded.poll_interval_minutes,
                     metadata_json = excluded.metadata_json,
                     updated_at = CURRENT_TIMESTAMP
                 """,
@@ -135,12 +142,9 @@ class Repository:
                     source.label,
                     int(source.enabled),
                     int(source.costs_money),
-                    source.provider,
                     source.feed_url,
                     source.handle,
-                    json.dumps(source.command),
                     json.dumps(source.transcript_languages),
-                    source.poll_interval_minutes,
                     json.dumps(source.metadata, sort_keys=True),
                     self.last_successful_scan_at(source.id),
                 ),
@@ -156,12 +160,9 @@ class Repository:
                     label,
                     enabled,
                     costs_money,
-                    provider,
                     feed_url,
                     handle,
-                    command_json,
                     transcript_languages_json,
-                    poll_interval_minutes,
                     metadata_json,
                     last_successful_scan_at
                 FROM sources
@@ -180,12 +181,9 @@ class Repository:
                     label,
                     enabled,
                     costs_money,
-                    provider,
                     feed_url,
                     handle,
-                    command_json,
                     transcript_languages_json,
-                    poll_interval_minutes,
                     metadata_json,
                     last_successful_scan_at
                 FROM sources
@@ -686,10 +684,9 @@ class Repository:
                 SourceStats(
                     source_id=str(row["source_id"]),
                     label=str(row["label"]),
-                    kind=normalize_source_kind(str(row["kind"])),
+                    kind=str(row["kind"]),
                     enabled=bool(row["enabled"]),
-                    costs_money=bool(row["costs_money"])
-                    or normalize_source_kind(str(row["kind"])) == "x",
+                    costs_money=bool(row["costs_money"]),
                     item_count=int(row["item_count"]),
                     size_bytes=int(row["size_bytes"]),
                 )
@@ -697,7 +694,7 @@ class Repository:
             ],
             kinds=[
                 SourceKindStats(
-                    kind=normalize_source_kind(str(row["kind"])),
+                    kind=str(row["kind"]),
                     source_count=int(row["source_count"]),
                     item_count=int(row["item_count"]),
                     size_bytes=int(row["size_bytes"]),
@@ -761,12 +758,86 @@ class Repository:
         source_columns = {
             str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
         }
+
         if "costs_money" not in source_columns:
             conn.execute(
                 "ALTER TABLE sources ADD COLUMN costs_money INTEGER NOT NULL DEFAULT 0"
             )
         if "last_successful_scan_at" not in source_columns:
             conn.execute("ALTER TABLE sources ADD COLUMN last_successful_scan_at TEXT")
+        source_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
+        }
+        if source_columns != set(SOURCE_COLUMNS) or Repository._sources_need_data_migration(
+            conn
+        ):
+            Repository._rebuild_sources_table(conn)
+
+    @staticmethod
+    def _rebuild_sources_table(conn: sqlite3.Connection) -> None:
+        existing_columns = {
+            str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
+        }
+        conn.execute("ALTER TABLE sources RENAME TO sources_legacy")
+        conn.execute(
+            """
+            CREATE TABLE sources (
+                source_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                label TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                costs_money INTEGER NOT NULL DEFAULT 0,
+                feed_url TEXT,
+                handle TEXT,
+                transcript_languages_json TEXT NOT NULL DEFAULT '[]',
+                metadata_json TEXT NOT NULL,
+                last_successful_scan_at TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT INTO sources ({", ".join(SOURCE_COLUMNS)})
+            SELECT
+                source_id,
+                CASE WHEN kind = 'blog' THEN 'feed' ELSE kind END,
+                label,
+                enabled,
+                CASE
+                    WHEN kind = 'x' THEN 1
+                    ELSE {Repository._source_column_expr(existing_columns, "costs_money", "0")}
+                END,
+                {Repository._source_column_expr(existing_columns, "feed_url", "NULL")},
+                {Repository._source_column_expr(existing_columns, "handle", "NULL")},
+                {Repository._source_column_expr(existing_columns, "transcript_languages_json", "'[]'")},
+                {Repository._source_column_expr(existing_columns, "metadata_json", "'{}'")},
+                {Repository._source_column_expr(existing_columns, "last_successful_scan_at", "NULL")},
+                {Repository._source_column_expr(existing_columns, "updated_at", "CURRENT_TIMESTAMP")}
+            FROM sources_legacy
+            """
+        )
+        conn.execute("DROP TABLE sources_legacy")
+
+    @staticmethod
+    def _source_column_expr(
+        existing_columns: set[str], column_name: str, fallback_sql: str
+    ) -> str:
+        if column_name in existing_columns:
+            return column_name
+        return fallback_sql
+
+    @staticmethod
+    def _sources_need_data_migration(conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM sources
+            WHERE kind = 'blog' OR (kind = 'x' AND costs_money = 0)
+            LIMIT 1
+            """
+        ).fetchone()
+        return row is not None
 
 
 def _row_to_item(row: sqlite3.Row) -> StoredItem:
@@ -788,19 +859,16 @@ def _row_to_item(row: sqlite3.Row) -> StoredItem:
 
 
 def _row_to_source(row: sqlite3.Row) -> SourceConfig:
-    kind = normalize_source_kind(str(row["kind"]))
+    kind = str(row["kind"])
     return SourceConfig(
         id=row["source_id"],
         kind=kind,
         label=row["label"],
         enabled=bool(row["enabled"]),
-        costs_money=bool(row["costs_money"]) or kind == "x",
-        provider=row["provider"],
+        costs_money=bool(row["costs_money"]),
         feed_url=row["feed_url"],
         handle=row["handle"],
-        command=_json_list(row["command_json"]),
         transcript_languages=_json_list(row["transcript_languages_json"]),
-        poll_interval_minutes=row["poll_interval_minutes"],
         metadata=_json_object(row["metadata_json"]),
         last_successful_scan_at=_parse_dt(row["last_successful_scan_at"]),
     )
