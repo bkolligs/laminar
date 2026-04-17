@@ -182,6 +182,172 @@ def test_records_last_successful_scan_time(tmp_path: Path) -> None:
     assert repo.last_successful_scan_at("feed-1") == scanned_at
 
 
+def test_get_source_returns_full_source_details(tmp_path: Path) -> None:
+    repo = Repository(tmp_path / "laminar.db")
+    scanned_at = datetime(2026, 4, 14, 18, 30, tzinfo=timezone.utc)
+    repo.upsert_source(
+        SourceConfig(
+            id="yt-1",
+            kind="youtube",
+            label="Example Channel",
+            enabled=False,
+            costs_money=True,
+            provider="youtube",
+            feed_url="https://www.youtube.com/feeds/videos.xml?channel_id=123",
+            handle="@example",
+            command=["yt-dlp", "--flat-playlist"],
+            transcript_languages=["en", "es"],
+            poll_interval_minutes=30,
+            metadata={"region": "us"},
+        )
+    )
+    repo.mark_source_scan_succeeded("yt-1", scanned_at)
+
+    source = repo.get_source("yt-1")
+
+    assert source is not None
+    assert source.id == "yt-1"
+    assert source.label == "Example Channel"
+    assert source.enabled is False
+    assert source.costs_money is True
+    assert source.provider == "youtube"
+    assert source.feed_url == "https://www.youtube.com/feeds/videos.xml?channel_id=123"
+    assert source.handle == "@example"
+    assert source.command == ["yt-dlp", "--flat-playlist"]
+    assert source.transcript_languages == ["en", "es"]
+    assert source.poll_interval_minutes == 30
+    assert source.metadata == {"region": "us"}
+    assert source.last_successful_scan_at == scanned_at
+
+
+def test_stats_reports_totals_by_source_and_kind(tmp_path: Path) -> None:
+    repo = Repository(tmp_path / "laminar.db")
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
+    repo.upsert_source(SourceConfig(id="yt-1", kind="youtube", label="Example Channel"))
+    repo.upsert_source(
+        SourceConfig(
+            id="x-1",
+            kind="x",
+            label="Example X",
+            costs_money=True,
+            enabled=False,
+        )
+    )
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="feed-1",
+            item_type="feed",
+            external_id="post-1",
+            canonical_url="https://example.com/post-1",
+            title="Post One",
+            author="Author",
+            published_at=datetime(2026, 4, 14, tzinfo=timezone.utc),
+            excerpt="One",
+            content_text="One",
+        )
+    )
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="feed-1",
+            item_type="feed",
+            external_id="post-2",
+            canonical_url="https://example.com/post-2",
+            title="Post Two",
+            author="Author",
+            published_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+            excerpt="Two",
+            content_text="Two",
+        )
+    )
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="yt-1",
+            item_type="video",
+            external_id="video-1",
+            canonical_url="https://youtube.com/watch?v=video-1",
+            title="Video One",
+            author="Channel",
+            published_at=datetime(2026, 4, 16, tzinfo=timezone.utc),
+            excerpt="Video",
+            content_text="Transcript",
+        )
+    )
+
+    stats = repo.stats()
+    sources_by_id = {source.source_id: source for source in stats.sources}
+    kinds_by_name = {kind.kind: kind for kind in stats.kinds}
+
+    assert stats.total_sources == 3
+    assert stats.total_items == 3
+    assert stats.total_size_bytes > 0
+    assert [(source.source_id, source.item_count) for source in stats.sources] == [
+        ("feed-1", 2),
+        ("yt-1", 1),
+        ("x-1", 0),
+    ]
+    assert {
+        kind.kind: (kind.source_count, kind.item_count) for kind in stats.kinds
+    } == {
+        "feed": (1, 2),
+        "x": (1, 0),
+        "youtube": (1, 1),
+    }
+    assert sources_by_id["feed-1"].size_bytes > sources_by_id["yt-1"].size_bytes > 0
+    assert sources_by_id["x-1"].size_bytes == 0
+    assert kinds_by_name["feed"].size_bytes == sources_by_id["feed-1"].size_bytes
+    assert kinds_by_name["youtube"].size_bytes == sources_by_id["yt-1"].size_bytes
+    assert kinds_by_name["x"].size_bytes == 0
+    assert stats.total_size_bytes == sum(source.size_bytes for source in stats.sources)
+
+
+def test_stats_include_items_without_matching_source(tmp_path: Path) -> None:
+    repo = Repository(tmp_path / "laminar.db")
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="feed-1",
+            item_type="feed",
+            external_id="post-1",
+            canonical_url="https://example.com/post-1",
+            title="Post One",
+            author="Author",
+            published_at=datetime(2026, 4, 14, tzinfo=timezone.utc),
+            excerpt="One",
+            content_text="One",
+        )
+    )
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="missing-source",
+            item_type="feed",
+            external_id="orphan-1",
+            canonical_url="https://example.com/orphan-1",
+            title="Orphaned Post",
+            author="Unknown",
+            published_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+            excerpt="Missing source",
+            content_text="Missing source content",
+        )
+    )
+
+    stats = repo.stats()
+    sources_by_id = {source.source_id: source for source in stats.sources}
+    kinds_by_name = {kind.kind: kind for kind in stats.kinds}
+
+    assert stats.total_sources == 1
+    assert stats.total_items == 2
+    assert "missing-source" in sources_by_id
+    assert sources_by_id["missing-source"].label == "[missing source]"
+    assert sources_by_id["missing-source"].kind == "missing"
+    assert sources_by_id["missing-source"].enabled is False
+    assert sources_by_id["missing-source"].costs_money is False
+    assert sources_by_id["missing-source"].item_count == 1
+    assert sources_by_id["missing-source"].size_bytes > 0
+    assert kinds_by_name["missing"].source_count == 1
+    assert kinds_by_name["missing"].item_count == 1
+    assert kinds_by_name["missing"].size_bytes == sources_by_id["missing-source"].size_bytes
+
+
 def test_remove_source_requires_recursive_when_items_exist(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
     repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))

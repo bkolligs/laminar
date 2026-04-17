@@ -28,6 +28,7 @@ class SourceConfig:
     transcript_languages: list[str] = field(default_factory=list)
     poll_interval_minutes: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    last_successful_scan_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -64,3 +65,31 @@ class StoredItem:
     content_language: str | None
     content_source: str | None
     raw_payload: dict[str, Any]
+
+
+@dataclass(slots=True)
+class SourceStats:
+    source_id: str
+    label: str
+    kind: str
+    enabled: bool
+    costs_money: bool
+    item_count: int
+    size_bytes: int
+
+
+@dataclass(slots=True)
+class SourceKindStats:
+    kind: str
+    source_count: int
+    item_count: int
+    size_bytes: int
+
+
+@dataclass(slots=True)
+class RepositoryStats:
+    total_sources: int
+    total_items: int
+    total_size_bytes: int
+    sources: list[SourceStats]
+    kinds: list[SourceKindStats]

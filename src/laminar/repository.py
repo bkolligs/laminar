@@ -7,7 +7,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from laminar.config import normalize_source_kind
-from laminar.models import NormalizedItem, SourceConfig, StoredItem
+from laminar.models import (
+    NormalizedItem,
+    RepositoryStats,
+    SourceConfig,
+    SourceKindStats,
+    SourceStats,
+    StoredItem,
+)
 
 
 SCHEMA = """
@@ -162,6 +169,31 @@ class Repository:
                 """
             ).fetchall()
         return [_row_to_source(row) for row in rows]
+
+    def get_source(self, source_id: str) -> SourceConfig | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    source_id,
+                    kind,
+                    label,
+                    enabled,
+                    costs_money,
+                    provider,
+                    feed_url,
+                    handle,
+                    command_json,
+                    transcript_languages_json,
+                    poll_interval_minutes,
+                    metadata_json,
+                    last_successful_scan_at
+                FROM sources
+                WHERE source_id = ?
+                """,
+                (source_id,),
+            ).fetchone()
+        return _row_to_source(row) if row else None
 
     def remove_source(self, source_id: str, *, recursive: bool = False) -> int | None:
         with self.connect() as conn:
@@ -494,6 +526,186 @@ class Repository:
             ).fetchall()
         return [_row_to_item(row) for row in rows]
 
+    def stats(self) -> RepositoryStats:
+        with self.connect() as conn:
+            totals = conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM sources) AS total_sources,
+                    (SELECT COUNT(*) FROM items) AS total_items,
+                    (
+                        SELECT COALESCE(SUM(
+                            length(CAST(i.item_id AS BLOB)) +
+                            length(CAST(i.source_id AS BLOB)) +
+                            length(CAST(i.item_type AS BLOB)) +
+                            length(CAST(COALESCE(i.external_id, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.canonical_url, '') AS BLOB)) +
+                            length(CAST(i.title AS BLOB)) +
+                            length(CAST(COALESCE(i.author, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.published_at, '') AS BLOB)) +
+                            length(CAST(i.retrieved_at AS BLOB)) +
+                            length(CAST(COALESCE(i.excerpt, '') AS BLOB)) +
+                            length(CAST(i.content_status AS BLOB)) +
+                            length(CAST(COALESCE(i.content_language, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.content_source, '') AS BLOB)) +
+                            length(CAST(i.raw_payload_json AS BLOB)) +
+                            length(CAST(i.content_hash AS BLOB)) +
+                            length(CAST(COALESCE(c.content_text, '') AS BLOB))
+                        ), 0)
+                        FROM items i
+                        LEFT JOIN item_contents c ON c.item_id = i.item_id
+                    ) AS total_size_bytes
+                """
+            ).fetchone()
+            source_rows = conn.execute(
+                """
+                WITH source_item_stats AS (
+                    SELECT
+                        i.source_id,
+                        COUNT(i.item_id) AS item_count,
+                        COALESCE(SUM(
+                            length(CAST(i.item_id AS BLOB)) +
+                            length(CAST(i.source_id AS BLOB)) +
+                            length(CAST(i.item_type AS BLOB)) +
+                            length(CAST(COALESCE(i.external_id, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.canonical_url, '') AS BLOB)) +
+                            length(CAST(i.title AS BLOB)) +
+                            length(CAST(COALESCE(i.author, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.published_at, '') AS BLOB)) +
+                            length(CAST(i.retrieved_at AS BLOB)) +
+                            length(CAST(COALESCE(i.excerpt, '') AS BLOB)) +
+                            length(CAST(i.content_status AS BLOB)) +
+                            length(CAST(COALESCE(i.content_language, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.content_source, '') AS BLOB)) +
+                            length(CAST(i.raw_payload_json AS BLOB)) +
+                            length(CAST(i.content_hash AS BLOB)) +
+                            length(CAST(COALESCE(c.content_text, '') AS BLOB))
+                        ), 0) AS size_bytes
+                    FROM items i
+                    LEFT JOIN item_contents c ON c.item_id = i.item_id
+                    GROUP BY i.source_id
+                )
+                SELECT
+                    s.source_id,
+                    s.label,
+                    s.kind,
+                    s.enabled,
+                    s.costs_money,
+                    COALESCE(sis.item_count, 0) AS item_count,
+                    COALESCE(sis.size_bytes, 0) AS size_bytes
+                FROM sources s
+                LEFT JOIN source_item_stats sis ON sis.source_id = s.source_id
+                UNION ALL
+                SELECT
+                    sis.source_id,
+                    '[missing source]' AS label,
+                    'missing' AS kind,
+                    0 AS enabled,
+                    0 AS costs_money,
+                    sis.item_count,
+                    sis.size_bytes
+                FROM source_item_stats sis
+                LEFT JOIN sources s ON s.source_id = sis.source_id
+                WHERE s.source_id IS NULL
+                ORDER BY 6 DESC, 7 DESC, 1
+                """
+            ).fetchall()
+            kind_rows = conn.execute(
+                """
+                WITH source_rollups AS (
+                    SELECT
+                        s.source_id,
+                        s.kind,
+                        COUNT(i.item_id) AS item_count,
+                        COALESCE(SUM(
+                            length(CAST(i.item_id AS BLOB)) +
+                            length(CAST(i.source_id AS BLOB)) +
+                            length(CAST(i.item_type AS BLOB)) +
+                            length(CAST(COALESCE(i.external_id, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.canonical_url, '') AS BLOB)) +
+                            length(CAST(i.title AS BLOB)) +
+                            length(CAST(COALESCE(i.author, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.published_at, '') AS BLOB)) +
+                            length(CAST(i.retrieved_at AS BLOB)) +
+                            length(CAST(COALESCE(i.excerpt, '') AS BLOB)) +
+                            length(CAST(i.content_status AS BLOB)) +
+                            length(CAST(COALESCE(i.content_language, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.content_source, '') AS BLOB)) +
+                            length(CAST(i.raw_payload_json AS BLOB)) +
+                            length(CAST(i.content_hash AS BLOB)) +
+                            length(CAST(COALESCE(c.content_text, '') AS BLOB))
+                        ), 0) AS size_bytes
+                    FROM sources s
+                    LEFT JOIN items i ON i.source_id = s.source_id
+                    LEFT JOIN item_contents c ON c.item_id = i.item_id
+                    GROUP BY s.source_id, s.kind
+                    UNION ALL
+                    SELECT
+                        i.source_id,
+                        'missing' AS kind,
+                        COUNT(i.item_id) AS item_count,
+                        COALESCE(SUM(
+                            length(CAST(i.item_id AS BLOB)) +
+                            length(CAST(i.source_id AS BLOB)) +
+                            length(CAST(i.item_type AS BLOB)) +
+                            length(CAST(COALESCE(i.external_id, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.canonical_url, '') AS BLOB)) +
+                            length(CAST(i.title AS BLOB)) +
+                            length(CAST(COALESCE(i.author, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.published_at, '') AS BLOB)) +
+                            length(CAST(i.retrieved_at AS BLOB)) +
+                            length(CAST(COALESCE(i.excerpt, '') AS BLOB)) +
+                            length(CAST(i.content_status AS BLOB)) +
+                            length(CAST(COALESCE(i.content_language, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.content_source, '') AS BLOB)) +
+                            length(CAST(i.raw_payload_json AS BLOB)) +
+                            length(CAST(i.content_hash AS BLOB)) +
+                            length(CAST(COALESCE(c.content_text, '') AS BLOB))
+                        ), 0) AS size_bytes
+                    FROM items i
+                    LEFT JOIN item_contents c ON c.item_id = i.item_id
+                    LEFT JOIN sources s ON s.source_id = i.source_id
+                    WHERE s.source_id IS NULL
+                    GROUP BY i.source_id
+                )
+                SELECT
+                    kind,
+                    COUNT(*) AS source_count,
+                    SUM(item_count) AS item_count,
+                    SUM(size_bytes) AS size_bytes
+                FROM source_rollups
+                GROUP BY kind
+                ORDER BY 2 DESC, 4 DESC, 1
+                """
+            ).fetchall()
+        return RepositoryStats(
+            total_sources=int(totals["total_sources"]),
+            total_items=int(totals["total_items"]),
+            total_size_bytes=int(totals["total_size_bytes"]),
+            sources=[
+                SourceStats(
+                    source_id=str(row["source_id"]),
+                    label=str(row["label"]),
+                    kind=normalize_source_kind(str(row["kind"])),
+                    enabled=bool(row["enabled"]),
+                    costs_money=bool(row["costs_money"])
+                    or normalize_source_kind(str(row["kind"])) == "x",
+                    item_count=int(row["item_count"]),
+                    size_bytes=int(row["size_bytes"]),
+                )
+                for row in source_rows
+            ],
+            kinds=[
+                SourceKindStats(
+                    kind=normalize_source_kind(str(row["kind"])),
+                    source_count=int(row["source_count"]),
+                    item_count=int(row["item_count"]),
+                    size_bytes=int(row["size_bytes"]),
+                )
+                for row in kind_rows
+            ],
+        )
+
     @staticmethod
     def _content_hash(item: NormalizedItem) -> str:
         parts = [
@@ -590,6 +802,7 @@ def _row_to_source(row: sqlite3.Row) -> SourceConfig:
         transcript_languages=_json_list(row["transcript_languages_json"]),
         poll_interval_minutes=row["poll_interval_minutes"],
         metadata=_json_object(row["metadata_json"]),
+        last_successful_scan_at=_parse_dt(row["last_successful_scan_at"]),
     )
 
 

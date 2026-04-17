@@ -195,6 +195,73 @@ def test_scan_and_query(tmp_path: Path) -> None:
     assert shown["raw_payload"]["transcript_segments"][0]["timestamp"] == "0:00"
     assert any(source.costs_money for source in repo.list_sources() if source.kind == "x")
 
+    source_id = next(
+        source.id for source in repo.list_sources() if source.label == "Example Channel"
+    )
+    source_show_buffer = io.StringIO()
+    with redirect_stdout(source_show_buffer):
+        source_show_args = parser.parse_args(["--db", str(db_path), "source", "show", source_id])
+        assert run(source_show_args) == 0
+    source_shown = json.loads(source_show_buffer.getvalue())
+    assert source_shown["source_id"] == source_id
+    assert source_shown["kind"] == "youtube"
+    assert source_shown["label"] == "Example Channel"
+    assert source_shown["transcript_languages"] == ["en"]
+    assert source_shown["item_count"] == 1
+    assert source_shown["logical_item_size_bytes"] > 0
+
+    stats_buffer = io.StringIO()
+    with redirect_stdout(stats_buffer):
+        stats_args = parser.parse_args(["--db", str(db_path), "stats"])
+        assert run(stats_args) == 0
+    stats_output = stats_buffer.getvalue()
+    assert "Overview" in stats_output
+    assert "Sources by Kind" in stats_output
+    assert "Items by Source" in stats_output
+    assert "Logical Item Size" in stats_output
+    assert "3" in stats_output
+    assert "Example Feed" in stats_output
+    assert "Example Channel" in stats_output
+    assert "Example X" in stats_output
+    assert "youtube" in stats_output
+    assert "B" in stats_output
+
+
+def test_source_show_reports_missing_source(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+
+    result = run(parser.parse_args(["--db", str(db_path), "source", "show", "missing"]))
+
+    assert result == 1
+
+
+def test_stats_include_items_without_matching_source(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_item(
+        NormalizedItem(
+            source_id="missing-source",
+            item_type="feed",
+            external_id="orphan-1",
+            canonical_url="https://example.com/orphan-1",
+            title="Orphaned Post",
+            author="Unknown",
+            published_at=datetime(2026, 4, 15, tzinfo=timezone.utc),
+            excerpt="Missing source",
+            content_text="Missing source content",
+        )
+    )
+
+    with redirect_stdout(io.StringIO()) as buffer:
+        args = parser.parse_args(["--db", str(db_path), "stats"])
+        assert run(args) == 0
+
+    output = buffer.getvalue()
+    assert "missing-source" in output
+    assert "missing" in output
+
 
 def test_scan_continues_after_source_failure_and_reports_item_statuses(
     tmp_path: Path,

@@ -15,6 +15,7 @@ uv sync
 uv run laminar source validate
 uv run laminar source add --kind feed --label "SCMP News" --feed-url https://www.scmp.com/rss/4/feed/
 uv run laminar scan
+uv run laminar stats
 uv run laminar items list
 ```
 
@@ -33,6 +34,7 @@ uv run laminar source add --kind feed --label "SCMP News" --feed-url https://www
 uv run laminar source add --kind youtube --label "Example Channel" --feed-url "https://www.youtube.com/feeds/videos.xml?channel_id=..." --transcript-language en
 uv run laminar source add --kind x --label "Example on X" --command xurl https://api.x.com/2/...
 uv run laminar source add --kind x --label "AI Researchers" --feed-url https://x.com/i/lists/1234567890
+uv run laminar source show SOURCE_ID
 uv run laminar source remove SOURCE_ID
 uv run laminar source remove --recursive SOURCE_ID
 uv run laminar items remove ITEM_ID
@@ -40,6 +42,7 @@ uv run laminar source list
 uv run laminar scan --include-paid
 uv run laminar scan -i -v
 uv run laminar scan --source youtube
+uv run laminar stats
 ```
 
 X sources are treated as paid by default. Use `--costs-money` for any other source backed by a paid or metered API. Paid sources are skipped by default during `scan`; pass `--include-paid` when you want to scan them.
@@ -48,8 +51,12 @@ For `--kind x`, Laminar can either run an explicit `--command` or resolve `--fee
 
 `laminar source remove` deletes the source definition and its scan history. Pass `--recursive` if you also want to delete all items already ingested from that source.
 
+`laminar source show` prints the stored details for a single source as JSON, including its config fields, last successful scan timestamp, item count, and logical item size.
+
 `laminar items remove` deletes a single stored item and its associated stored content. Like `items show`, it accepts an exact item ID, a unique item ID prefix, or a unique title.
 
 Pass `-v` or `--verbose` to `laminar scan` when you want detailed progress logging, including the active incremental cutoff and when older entries are skipped because they are at or before that watermark. Use `-i` or `--include-paid` to include paid sources.
 
 `laminar scan` stores the last successful scan time for each source and uses it as an incremental cutoff on later runs. Feed and YouTube scans assume reverse-chronological ordering and stop once they reach older entries; X scans currently still invoke the configured command or resolved `xurl` target and then filter out items at or before the last successful scan time locally.
+
+`laminar stats` shows an overview of total sources and items, plus approximate logical item size derived from the text stored in SQLite. It also groups counts and size by source kind and by individual source.

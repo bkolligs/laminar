@@ -18,7 +18,6 @@ from laminar.config import (
 from laminar.models import SourceConfig
 from laminar.repository import Repository
 from rich.console import Console
-from rich.json import JSON
 from rich.table import Table
 
 
@@ -64,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     source_subparsers.add_parser("validate")
     source_subparsers.add_parser("list")
+    show_source = source_subparsers.add_parser("show")
+    show_source.add_argument("source_id")
 
     add_source = source_subparsers.add_parser("add")
     add_source.add_argument("--kind", required=True, choices=["feed", "youtube", "x"])
@@ -141,6 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("query")
     search_parser.add_argument("--limit", type=int, default=20)
 
+    stats_parser = subparsers.add_parser("stats")
+    stats_parser.set_defaults(command="stats")
+
     return parser
 
 
@@ -158,6 +162,8 @@ def run(args: argparse.Namespace) -> int:
         return _run_items(args)
     if command == "search":
         return _run_search(args)
+    if command == "stats":
+        return _run_stats(args)
     raise ValueError(f"Unsupported command: {command}")
 
 
@@ -188,6 +194,38 @@ def _run_source(args: argparse.Namespace) -> int:
             )
         else:
             _console().print(f"Removed source {args.source_id} from {runtime.database_path}")
+        return 0
+    if args.source_command == "show":
+        source = repo.get_source(args.source_id)
+        if source is None:
+            print(f"Source {args.source_id} not found", file=sys.stderr)
+            return 1
+        source_stats = next(
+            (entry for entry in repo.stats().sources if entry.source_id == source.id),
+            None,
+        )
+        payload = {
+            "source_id": source.id,
+            "kind": source.kind,
+            "label": source.label,
+            "enabled": source.enabled,
+            "costs_money": source.costs_money,
+            "provider": source.provider,
+            "feed_url": source.feed_url,
+            "handle": source.handle,
+            "command": source.command,
+            "transcript_languages": source.transcript_languages,
+            "poll_interval_minutes": source.poll_interval_minutes,
+            "metadata": source.metadata,
+            "last_successful_scan_at": (
+                source.last_successful_scan_at.isoformat()
+                if source.last_successful_scan_at
+                else None
+            ),
+            "item_count": source_stats.item_count if source_stats else 0,
+            "logical_item_size_bytes": source_stats.size_bytes if source_stats else 0,
+        }
+        _print_json(payload)
         return 0
 
     sources = repo.list_sources()
@@ -358,7 +396,7 @@ def _run_items(args: argparse.Namespace) -> int:
         "content_text": item.content_text,
         "raw_payload": item.raw_payload,
     }
-    _console().print(JSON.from_data(payload, indent=2, sort_keys=True))
+    _print_json(payload)
     return 0
 
 
@@ -375,6 +413,73 @@ def _run_search(args: argparse.Namespace) -> int:
         table.add_row(item.item_id, item.item_type, item.source_id, item.title)
     _console().print(table)
     return 0
+
+
+def _run_stats(args: argparse.Namespace) -> int:
+    runtime = _load_runtime(args)
+    repo = Repository(runtime.database_path)
+    stats = repo.stats()
+    console = _console()
+
+    overview = Table(title="Overview")
+    overview.add_column("Metric", style="cyan")
+    overview.add_column("Value", justify="right", style="bold")
+    overview.add_row("Sources", str(stats.total_sources))
+    overview.add_row("Items", str(stats.total_items))
+    overview.add_row("Logical Item Size", _format_bytes(stats.total_size_bytes))
+    console.print(overview)
+
+    kind_table = Table(title="Sources by Kind")
+    kind_table.add_column("Kind", style="magenta")
+    kind_table.add_column("Sources", justify="right")
+    kind_table.add_column("Items", justify="right")
+    kind_table.add_column("Size", justify="right")
+    for kind in stats.kinds:
+        kind_table.add_row(
+            kind.kind,
+            str(kind.source_count),
+            str(kind.item_count),
+            _format_bytes(kind.size_bytes),
+        )
+    console.print(kind_table)
+
+    source_table = Table(title="Items by Source")
+    source_table.add_column("ID", style="cyan")
+    source_table.add_column("Label", style="bold")
+    source_table.add_column("Kind", style="magenta")
+    source_table.add_column("Status")
+    source_table.add_column("Cost")
+    source_table.add_column("Items", justify="right")
+    source_table.add_column("Size", justify="right")
+    for source in stats.sources:
+        source_table.add_row(
+            source.source_id,
+            source.label,
+            source.kind,
+            "enabled" if source.enabled else "disabled",
+            "paid" if source.costs_money else "free",
+            str(source.item_count),
+            _format_bytes(source.size_bytes),
+        )
+    console.print(source_table)
+    return 0
+
+
+def _format_bytes(size_bytes: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    size = float(size_bytes)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size_bytes} B"
+
+
+def _print_json(payload: dict[str, object]) -> None:
+    sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True))
+    sys.stdout.write("\n")
 
 
 def main() -> None:
