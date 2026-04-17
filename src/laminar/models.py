@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
@@ -12,6 +13,19 @@ def utc_now() -> datetime:
 
 def new_uuid() -> str:
     return str(uuid4())
+
+
+class ContentStatus(StrEnum):
+    AVAILABLE = "available"
+    MISSING = "missing"
+    FETCH_FAILED = "fetch_failed"
+    RATE_LIMITED = "rate_limited"
+
+    @classmethod
+    def coerce(cls, value: "ContentStatus | str") -> "ContentStatus":
+        if isinstance(value, cls):
+            return value
+        return cls(value)
 
 
 @dataclass(slots=True)
@@ -39,7 +53,7 @@ class NormalizedItem:
     published_at: datetime | None
     excerpt: str | None
     content_text: str | None = None
-    content_status: str = "available"
+    content_status: ContentStatus = ContentStatus.AVAILABLE
     content_language: str | None = None
     content_source: str | None = None
     raw_payload: dict[str, Any] = field(default_factory=dict)
@@ -58,7 +72,7 @@ class StoredItem:
     author: str | None
     excerpt: str | None
     content_text: str | None
-    content_status: str
+    content_status: ContentStatus
     content_language: str | None
     content_source: str | None
     raw_payload: dict[str, Any]

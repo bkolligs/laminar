@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from laminar.models import (
+    ContentStatus,
     NormalizedItem,
     RepositoryStats,
     SourceConfig,
@@ -747,7 +748,7 @@ def _row_to_item(row: sqlite3.Row) -> StoredItem:
         author=row["author"],
         excerpt=row["excerpt"],
         content_text=row["content_text"],
-        content_status=row["content_status"],
+        content_status=ContentStatus.coerce(str(row["content_status"])),
         content_language=row["content_language"],
         content_source=row["content_source"],
         raw_payload=json.loads(row["raw_payload_json"]),

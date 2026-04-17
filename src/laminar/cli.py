@@ -15,8 +15,9 @@ from laminar.config import (
     ensure_default_config,
     validate_source,
 )
-from laminar.models import SourceConfig
+from laminar.models import ContentStatus, SourceConfig
 from laminar.repository import Repository
+from laminar import youtube_api
 from rich.console import Console
 from rich.table import Table
 
@@ -93,6 +94,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="Preferred transcript language for YouTube sources. Repeat to try more than one. Defaults to en.",
+    )
+    add_source.add_argument(
+        "--num-items",
+        dest="num_items",
+        type=int,
+        default=None,
+        help="Maximum number of recent YouTube videos to fetch per scan. Defaults to 5 for YouTube sources.",
     )
     add_source.add_argument(
         "--paid",
@@ -345,6 +353,7 @@ def _run_scan(args: argparse.Namespace) -> int:
                     console.print(f"{source.id}: new {item.title}", style="green")
                 else:
                     console.print(f"{source.id}: existing {item.title}", style="cyan")
+                _report_item_content_status(console, source.id, item)
             repo.finish_scan(
                 scan_id, status="success", items_seen=len(items), items_new=new_count
             )
@@ -497,6 +506,25 @@ def _format_bytes(size_bytes: int) -> str:
     return f"{size_bytes} B"
 
 
+def _report_item_content_status(
+    console: Console,
+    source_id: str,
+    item,
+) -> None:
+    if item.item_type != "video":
+        return
+    if item.content_status == ContentStatus.AVAILABLE:
+        return
+
+    if item.content_status == ContentStatus.MISSING:
+        message = "transcript missing"
+    elif item.content_status == ContentStatus.RATE_LIMITED:
+        message = "transcript rate-limited"
+    else:
+        message = "transcript fetch failed"
+    console.print(f"{source_id}: {message} for {item.title}", style="yellow")
+
+
 def _print_json(payload: dict[str, object]) -> None:
     sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True))
     sys.stdout.write("\n")
@@ -534,6 +562,11 @@ def _build_source_from_args(args: argparse.Namespace) -> SourceConfig:
     transcript_languages = args.transcript_language
     if normalized_kind == "youtube" and not transcript_languages:
         transcript_languages = ["en"]
+    if args.num_items is not None and args.num_items < 1:
+        raise ConfigError("--num-items must be at least 1")
+    metadata = _parse_metadata(args.metadata)
+    if normalized_kind == "youtube":
+        metadata = _resolve_youtube_metadata(feed_url, metadata, num_items=args.num_items)
     return SourceConfig(
         id=str(uuid4()),
         kind=normalized_kind,
@@ -543,7 +576,7 @@ def _build_source_from_args(args: argparse.Namespace) -> SourceConfig:
         feed_url=feed_url,
         handle=_infer_x_handle(feed_url, normalized_kind),
         transcript_languages=transcript_languages,
-        metadata=_parse_metadata(args.metadata),
+        metadata=metadata,
     )
 
 
@@ -568,9 +601,28 @@ def _resolve_source_kind(url: str, explicit_kind: str | None) -> str:
     host = parsed.netloc.lower()
     if host.endswith("x.com"):
         return "x"
-    if host.endswith("youtube.com") and parsed.path == "/feeds/videos.xml":
+    if youtube_api.looks_like_youtube_url(url):
         return "youtube"
     return "feed"
+
+
+def _resolve_youtube_metadata(
+    url: str,
+    metadata: dict[str, object],
+    *,
+    num_items: int | None,
+) -> dict[str, object]:
+    resolved_metadata = dict(metadata)
+    resolved_metadata["num_items"] = num_items or 5
+    if not youtube_api.looks_like_youtube_url(url):
+        return resolved_metadata
+    try:
+        channel = youtube_api.resolve_channel_from_url(url)
+    except youtube_api.YouTubeApiError as exc:
+        raise ConfigError(f"Could not resolve YouTube source {url}: {exc}") from exc
+    resolved_metadata["channel_id"] = channel.channel_id
+    resolved_metadata["uploads_playlist_id"] = channel.uploads_playlist_id
+    return resolved_metadata
 
 
 def _infer_x_handle(url: str, kind: str) -> str | None:

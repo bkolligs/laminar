@@ -7,12 +7,15 @@ from pathlib import Path
 from urllib.error import HTTPError
 from uuid import UUID
 
+import pytest
+
 import laminar.adapters as adapters
 import laminar.cli as cli
 from laminar.cli import build_parser, run
-from laminar.models import NormalizedItem, SourceConfig
+from laminar.config import ConfigError
+from laminar.models import ContentStatus, NormalizedItem, SourceConfig
 from laminar.repository import Repository
-from laminar.youtube import TranscriptResult, TranscriptSegment
+from laminar.youtube import TranscriptResult, TranscriptSegment, TranscriptUnavailable
 
 
 def test_scan_and_query(tmp_path: Path) -> None:
@@ -558,6 +561,199 @@ def test_scan_uses_last_successful_scan_time_for_incremental_blog_and_youtube(
         assert fetch_calls == ["new123"]
     finally:
         adapters.fetch_transcript = original_fetch
+
+
+def test_scan_uses_youtube_api_uploads_playlist_metadata(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_source(
+        SourceConfig(
+            id="youtube-source",
+            kind="youtube",
+            name="Example Channel",
+            feed_url="https://www.youtube.com/watch?v=abc123",
+            transcript_languages=["en"],
+            metadata={
+                "channel_id": "UC123",
+                "uploads_playlist_id": "UU123",
+            },
+        )
+    )
+    repo.mark_source_scan_succeeded(
+        "youtube-source",
+        datetime(2026, 4, 14, 12, 30, tzinfo=timezone.utc),
+    )
+
+    original_iter_uploads = adapters.youtube_api.iter_uploads
+    original_fetch = adapters.fetch_transcript
+    fetch_calls: list[str] = []
+
+    def fake_iter_uploads(uploads_playlist_id: str, **kwargs: object):
+        assert uploads_playlist_id == "UU123"
+        assert kwargs["limit"] == 5
+        assert kwargs["page_size"] == 1
+        return iter(
+            [
+                adapters.youtube_api.YouTubeUpload(
+                    video_id="new123",
+                    title="New API Video",
+                    description="Fresh upload",
+                    channel_title="Example Channel",
+                    published_at=datetime(2026, 4, 14, 13, 0, tzinfo=timezone.utc),
+                    canonical_url="https://www.youtube.com/watch?v=new123",
+                ),
+                adapters.youtube_api.YouTubeUpload(
+                    video_id="old123",
+                    title="Old API Video",
+                    description="Older upload",
+                    channel_title="Example Channel",
+                    published_at=datetime(2026, 4, 14, 12, 0, tzinfo=timezone.utc),
+                    canonical_url="https://www.youtube.com/watch?v=old123",
+                ),
+            ]
+        )
+
+    def fake_fetch_transcript(
+        video_id_or_url: str,
+        languages: list[str] | None = None,
+    ) -> TranscriptResult:
+        fetch_calls.append(video_id_or_url)
+        assert languages == ["en"]
+        return TranscriptResult(
+            text=f"transcript for {video_id_or_url}",
+            language_code="en",
+            language_name="English",
+            source="youtube_transcript_api_manual",
+            is_generated=False,
+            segments=[
+                TranscriptSegment(
+                    text=f"transcript for {video_id_or_url}",
+                    start=0.0,
+                    duration=1.0,
+                    timestamp="0:00",
+                )
+            ],
+        )
+
+    adapters.youtube_api.iter_uploads = fake_iter_uploads
+    adapters.fetch_transcript = fake_fetch_transcript
+    try:
+        scan_buffer = io.StringIO()
+        with redirect_stdout(scan_buffer):
+            args = parser.parse_args(["--db", str(db_path), "scan", "--source", "youtube"])
+            assert run(args) == 0
+    finally:
+        adapters.youtube_api.iter_uploads = original_iter_uploads
+        adapters.fetch_transcript = original_fetch
+
+    output = scan_buffer.getvalue()
+    assert "Scanning youtube-source (Example Channel)" in output
+    assert "youtube-source: new New API Video" in output
+    assert "youtube-source: new Old API Video" not in output
+    assert fetch_calls == ["new123"]
+
+
+def test_source_add_rejects_invalid_num_items(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+
+    add_args = parser.parse_args(
+        [
+            "--db",
+            str(db_path),
+            "source",
+            "add",
+            "--name",
+            "Example Channel",
+            "--num-items",
+            "0",
+            "https://www.youtube.com/watch?v=abc123",
+        ]
+    )
+
+    with pytest.raises(ConfigError, match="--num-items must be at least 1"):
+        run(add_args)
+
+
+
+def test_scan_stops_after_youtube_transcript_failure(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_source(
+        SourceConfig(
+            id="youtube-source",
+            kind="youtube",
+            name="Example Channel",
+            feed_url="https://www.youtube.com/watch?v=abc123",
+            transcript_languages=["en"],
+            metadata={
+                "channel_id": "UC123",
+                "uploads_playlist_id": "UU123",
+            },
+        )
+    )
+
+    original_iter_uploads = adapters.youtube_api.iter_uploads
+    original_fetch = adapters.fetch_transcript
+    fetch_calls: list[str] = []
+
+    def fake_iter_uploads(uploads_playlist_id: str, **kwargs: object):
+        assert uploads_playlist_id == "UU123"
+        assert kwargs["limit"] == 5
+        assert kwargs["page_size"] == 1
+        return iter(
+            [
+                adapters.youtube_api.YouTubeUpload(
+                    video_id="new123",
+                    title="New API Video",
+                    description="Fresh upload",
+                    channel_title="Example Channel",
+                    published_at=datetime(2026, 4, 14, 13, 0, tzinfo=timezone.utc),
+                    canonical_url="https://www.youtube.com/watch?v=new123",
+                ),
+                adapters.youtube_api.YouTubeUpload(
+                    video_id="next123",
+                    title="Second API Video",
+                    description="Should not be fetched after transcript failure",
+                    channel_title="Example Channel",
+                    published_at=datetime(2026, 4, 14, 12, 0, tzinfo=timezone.utc),
+                    canonical_url="https://www.youtube.com/watch?v=next123",
+                ),
+            ]
+        )
+
+    def fake_fetch_transcript(
+        video_id_or_url: str,
+        languages: list[str] | None = None,
+    ) -> TranscriptResult:
+        fetch_calls.append(video_id_or_url)
+        raise TranscriptUnavailable(
+            "YouTube is receiving too many requests from your IP address",
+            content_status=ContentStatus.RATE_LIMITED,
+        )
+
+    adapters.youtube_api.iter_uploads = fake_iter_uploads
+    adapters.fetch_transcript = fake_fetch_transcript
+    try:
+        scan_buffer = io.StringIO()
+        with redirect_stdout(scan_buffer):
+            args = parser.parse_args(["--db", str(db_path), "scan", "--source", "youtube"])
+            assert run(args) == 0
+    finally:
+        adapters.youtube_api.iter_uploads = original_iter_uploads
+        adapters.fetch_transcript = original_fetch
+
+    output = scan_buffer.getvalue()
+    assert "youtube-source: new New API Video" in output
+    assert "youtube-source: transcript rate-limited for New API Video" in output
+    assert "youtube-source: new Second API Video" not in output
+    stored_items = Repository(db_path).list_items(limit=10)
+    assert len(stored_items) == 1
+    assert stored_items[0].content_status == ContentStatus.RATE_LIMITED
+    assert fetch_calls == ["new123"]
+
 
 
 def test_scan_filters_x_items_using_last_successful_scan_time(tmp_path: Path) -> None:
@@ -1134,30 +1330,83 @@ def test_x_profile_urls_infer_handle(tmp_path: Path) -> None:
     assert sources[0].handle == "example"
 
 
-def test_youtube_urls_infer_youtube_kind(tmp_path: Path) -> None:
+def test_youtube_urls_infer_youtube_kind_and_store_api_metadata(tmp_path: Path) -> None:
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
+    original_resolve = cli.youtube_api.resolve_channel_from_url
 
-    add_args = parser.parse_args(
-        [
-            "--db",
-            str(db_path),
-            "source",
-            "add",
-            "--name",
-            "Example Channel",
-            "https://www.youtube.com/feeds/videos.xml?channel_id=abc123",
-        ]
-    )
-    assert run(add_args) == 0
+    def fake_resolve_channel_from_url(url: str):
+        assert url == "https://www.youtube.com/watch?v=abc123"
+        return cli.youtube_api.YouTubeChannel(
+            channel_id="UC123",
+            title="Example Channel",
+            uploads_playlist_id="UU123",
+        )
+
+    cli.youtube_api.resolve_channel_from_url = fake_resolve_channel_from_url
+    try:
+        add_args = parser.parse_args(
+            [
+                "--db",
+                str(db_path),
+                "source",
+                "add",
+                "--name",
+                "Example Channel",
+                "https://www.youtube.com/watch?v=abc123",
+            ]
+        )
+        assert run(add_args) == 0
+    finally:
+        cli.youtube_api.resolve_channel_from_url = original_resolve
 
     sources = Repository(db_path).list_sources()
     assert len(sources) == 1
     assert sources[0].kind == "youtube"
     assert sources[0].transcript_languages == ["en"]
+    assert sources[0].metadata["channel_id"] == "UC123"
+    assert sources[0].metadata["uploads_playlist_id"] == "UU123"
+    assert sources[0].metadata["num_items"] == 5
 
 
-def test_regular_youtube_urls_do_not_infer_youtube_kind(tmp_path: Path) -> None:
+def test_youtube_sources_allow_custom_num_items(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    original_resolve = cli.youtube_api.resolve_channel_from_url
+
+    def fake_resolve_channel_from_url(url: str):
+        assert url == "https://www.youtube.com/watch?v=abc123"
+        return cli.youtube_api.YouTubeChannel(
+            channel_id="UC123",
+            title="Example Channel",
+            uploads_playlist_id="UU123",
+        )
+
+    cli.youtube_api.resolve_channel_from_url = fake_resolve_channel_from_url
+    try:
+        add_args = parser.parse_args(
+            [
+                "--db",
+                str(db_path),
+                "source",
+                "add",
+                "--name",
+                "Example Channel",
+                "--num-items",
+                "12",
+                "https://www.youtube.com/watch?v=abc123",
+            ]
+        )
+        assert run(add_args) == 0
+    finally:
+        cli.youtube_api.resolve_channel_from_url = original_resolve
+
+    sources = Repository(db_path).list_sources()
+    assert len(sources) == 1
+    assert sources[0].metadata["num_items"] == 12
+
+
+def test_non_youtube_urls_default_to_feed_kind(tmp_path: Path) -> None:
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
 
@@ -1168,8 +1417,8 @@ def test_regular_youtube_urls_do_not_infer_youtube_kind(tmp_path: Path) -> None:
             "source",
             "add",
             "--name",
-            "Example Video",
-            "https://www.youtube.com/watch?v=abc123",
+            "Example Feed",
+            "https://example.com/feed.xml",
         ]
     )
     assert run(add_args) == 0
@@ -1194,7 +1443,7 @@ def test_youtube_sources_default_transcript_language_to_english(tmp_path: Path) 
             "youtube",
             "--name",
             "Example Channel",
-            "https://www.youtube.com/feeds/videos.xml?channel_id=abc123",
+            "https://example.com/youtube.xml",
         ]
     )
     assert run(add_args) == 0
@@ -1202,6 +1451,7 @@ def test_youtube_sources_default_transcript_language_to_english(tmp_path: Path) 
     sources = Repository(db_path).list_sources()
     assert len(sources) == 1
     assert sources[0].transcript_languages == ["en"]
+    assert sources[0].metadata["num_items"] == 5
 
 
 def test_explicit_type_overrides_url_inference(tmp_path: Path) -> None:

@@ -8,12 +8,13 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 from xml.etree import ElementTree
 
 from laminar.fetch import fetch_text
-from laminar.models import NormalizedItem, SourceConfig
+from laminar.models import ContentStatus, NormalizedItem, SourceConfig
 from laminar.youtube import (
     TranscriptUnavailable,
     extract_video_id,
     fetch_transcript,
 )
+from laminar import youtube_api
 
 
 class Adapter(Protocol):
@@ -132,6 +133,85 @@ class YouTubeAdapter:
         since: datetime | None = None,
         verbose: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]:
+        uploads_playlist_id = _youtube_uploads_playlist_id(source)
+        if uploads_playlist_id is not None:
+            return self._scan_api(
+                source,
+                uploads_playlist_id,
+                since=since,
+                verbose=verbose,
+            )
+        return self._scan_feed(source, since=since, verbose=verbose)
+
+    def _scan_api(
+        self,
+        source: SourceConfig,
+        uploads_playlist_id: str,
+        *,
+        since: datetime | None = None,
+        verbose: Callable[[str], None] | None = None,
+    ) -> list[NormalizedItem]:
+        items: list[NormalizedItem] = []
+        num_items = _youtube_num_items(source)
+        for upload in youtube_api.iter_uploads(
+            uploads_playlist_id,
+            limit=num_items,
+            page_size=1,
+        ):
+            if since and upload.published_at and upload.published_at <= since:
+                _verbose_log(
+                    verbose,
+                    f"{source.id}: stopping youtube scan at {_display_dt(upload.published_at)} because it is at or before cutoff {_display_dt(since)}",
+                )
+                break
+            transcript_payload = _fetch_transcript_payload(
+                source,
+                upload.video_id,
+                verbose=verbose,
+            )
+            items.append(
+                NormalizedItem(
+                    source_id=source.id,
+                    item_type="video",
+                    external_id=upload.video_id,
+                    canonical_url=upload.canonical_url,
+                    title=upload.title,
+                    author=upload.channel_title or source.name,
+                    published_at=upload.published_at,
+                    excerpt=upload.description or upload.title,
+                    content_text=transcript_payload["content_text"],
+                    content_status=transcript_payload["content_status"],
+                    content_language=transcript_payload["content_language"],
+                    content_source=transcript_payload["content_source"],
+                    raw_payload={
+                        "video_id": upload.video_id,
+                        "channel_id": source.metadata.get("channel_id"),
+                        "uploads_playlist_id": uploads_playlist_id,
+                        "channel_title": upload.channel_title,
+                        "transcript_is_generated": transcript_payload[
+                            "transcript_is_generated"
+                        ],
+                        "transcript_segments": transcript_payload[
+                            "transcript_segments"
+                        ],
+                    },
+                )
+            )
+            if transcript_payload["content_status"] != ContentStatus.AVAILABLE:
+                _verbose_log(
+                    verbose,
+                    f"{source.id}: stopping youtube scan after transcript {transcript_payload['content_status'].value} for {upload.video_id}",
+                )
+                break
+        return items
+
+    def _scan_feed(
+        self,
+        source: SourceConfig,
+        *,
+        since: datetime | None = None,
+        verbose: Callable[[str], None] | None = None,
+    ) -> list[NormalizedItem]:
         xml_text = fetch_text(source.feed_url or "")
         root = ElementTree.fromstring(xml_text)
         ns = {
@@ -140,7 +220,10 @@ class YouTubeAdapter:
         }
         channel_title = _find_text(root, "./atom:title", ns)
         items: list[NormalizedItem] = []
+        num_items = _youtube_num_items(source)
         for entry in root.findall("./atom:entry", ns):
+            if len(items) >= num_items:
+                break
             published_at = _parse_dt(_find_text(entry, "./atom:published", ns))
             if since and published_at and published_at <= since:
                 _verbose_log(
@@ -154,43 +237,11 @@ class YouTubeAdapter:
             video_id = _find_text(entry, "./yt:videoId", ns) or extract_video_id(
                 video_url
             )
-            transcript_text = None
-            transcript_status = "missing"
-            transcript_language = None
-            transcript_source = None
-            transcript_segments: list[dict[str, object]] = []
-            transcript_is_generated = None
-            if video_url and video_id:
-                try:
-                    transcript = fetch_transcript(
-                        video_id,
-                        source.transcript_languages,
-                    )
-                    transcript_text = transcript.text
-                    transcript_language = transcript.language_code
-                    transcript_source = transcript.source
-                    transcript_is_generated = transcript.is_generated
-                    transcript_segments = [
-                        {
-                            "text": segment.text,
-                            "start": segment.start,
-                            "duration": segment.duration,
-                            "timestamp": segment.timestamp,
-                        }
-                        for segment in transcript.segments
-                    ]
-                    transcript_status = "available"
-                    _verbose_log(
-                        verbose,
-                        f"{source.id}: transcript available for {video_id} in {transcript_language or 'unknown language'} via {transcript_source or 'unknown source'}",
-                    )
-                except TranscriptUnavailable:
-                    transcript_status = "missing"
-                    _verbose_log(
-                        verbose,
-                        f"{source.id}: transcript missing for {video_id}",
-                    )
-
+            transcript_payload = _fetch_transcript_payload(
+                source,
+                video_id,
+                verbose=verbose,
+            )
             items.append(
                 NormalizedItem(
                     source_id=source.id,
@@ -203,19 +254,108 @@ class YouTubeAdapter:
                     published_at=published_at,
                     excerpt=_find_text(entry, "./atom:group/atom:description", ns)
                     or _find_text(entry, "./atom:title", ns),
-                    content_text=transcript_text,
-                    content_status=transcript_status,
-                    content_language=transcript_language,
-                    content_source=transcript_source,
+                    content_text=transcript_payload["content_text"],
+                    content_status=transcript_payload["content_status"],
+                    content_language=transcript_payload["content_language"],
+                    content_source=transcript_payload["content_source"],
                     raw_payload={
                         "video_id": video_id,
                         "channel_title": channel_title,
-                        "transcript_is_generated": transcript_is_generated,
-                        "transcript_segments": transcript_segments,
+                        "transcript_is_generated": transcript_payload[
+                            "transcript_is_generated"
+                        ],
+                        "transcript_segments": transcript_payload[
+                            "transcript_segments"
+                        ],
                     },
                 )
             )
+            if transcript_payload["content_status"] != ContentStatus.AVAILABLE:
+                _verbose_log(
+                    verbose,
+                    f"{source.id}: stopping youtube scan after transcript {transcript_payload['content_status'].value} for {video_id or '(unknown video)'}",
+                )
+                break
         return items
+
+
+def _youtube_num_items(source: SourceConfig) -> int:
+    num_items = source.metadata.get("num_items")
+    if isinstance(num_items, int) and num_items > 0:
+        return num_items
+    if isinstance(num_items, str):
+        try:
+            parsed = int(num_items)
+        except ValueError:
+            parsed = 0
+        if parsed > 0:
+            return parsed
+    return 5
+
+
+def _youtube_uploads_playlist_id(source: SourceConfig) -> str | None:
+    uploads_playlist_id = source.metadata.get("uploads_playlist_id")
+    if isinstance(uploads_playlist_id, str) and uploads_playlist_id.strip():
+        return uploads_playlist_id.strip()
+
+    channel_id = source.metadata.get("channel_id")
+    if isinstance(channel_id, str) and channel_id.strip():
+        return youtube_api.get_channel(channel_id.strip()).uploads_playlist_id
+
+    if source.feed_url and youtube_api.looks_like_youtube_url(source.feed_url):
+        return youtube_api.resolve_channel_from_url(source.feed_url).uploads_playlist_id
+
+    return None
+
+
+def _fetch_transcript_payload(
+    source: SourceConfig,
+    video_id: str | None,
+    *,
+    verbose: Callable[[str], None] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "content_text": None,
+        "content_status": ContentStatus.FETCH_FAILED,
+        "content_language": None,
+        "content_source": None,
+        "transcript_is_generated": None,
+        "transcript_segments": [],
+    }
+    if not video_id:
+        return payload
+
+    try:
+        transcript = fetch_transcript(
+            video_id,
+            source.transcript_languages,
+        )
+        payload["content_text"] = transcript.text
+        payload["content_language"] = transcript.language_code
+        payload["content_source"] = transcript.source
+        payload["transcript_is_generated"] = transcript.is_generated
+        payload["transcript_segments"] = [
+            {
+                "text": segment.text,
+                "start": segment.start,
+                "duration": segment.duration,
+                "timestamp": segment.timestamp,
+            }
+            for segment in transcript.segments
+        ]
+        payload["content_status"] = ContentStatus.AVAILABLE
+        _verbose_log(
+            verbose,
+            f"{source.id}: transcript available for {video_id} in {transcript.language_code or 'unknown language'} via {transcript.source or 'unknown source'}",
+        )
+    except TranscriptUnavailable as exc:
+        payload["content_status"] = exc.content_status
+        _verbose_log(
+            verbose,
+            f"{source.id}: transcript {exc.content_status.value} for {video_id}",
+        )
+
+    return payload
 
 
 class XAdapter:

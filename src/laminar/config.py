@@ -39,8 +39,13 @@ def validate_source(source: SourceConfig) -> None:
     if kind not in {"feed", "youtube", "x"}:
         raise ConfigError(f"Source {source.id}: unsupported kind {source.kind!r}")
 
-    if kind in {"feed", "youtube"} and not source.feed_url:
-        raise ConfigError(f"Source {source.id}: {kind} sources require feed_url")
+    if kind == "feed" and not source.feed_url:
+        raise ConfigError(f"Source {source.id}: feed sources require feed_url")
+
+    if kind == "youtube" and not source.feed_url and not source.metadata.get("uploads_playlist_id"):
+        raise ConfigError(
+            f"Source {source.id}: youtube sources require feed_url or metadata.uploads_playlist_id"
+        )
 
     if kind == "x" and not source.feed_url and not source.metadata.get("api_url"):
         raise ConfigError(f"Source {source.id}: x sources require feed_url or api_url")

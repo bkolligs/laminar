@@ -1,6 +1,6 @@
 # Laminar
 
-> Never look at an algorithmic feed that you don't control again
+> Never look at an algorithmic feed that you _don't control_ ever again
 
 ![Laminar logo](assets/laminar-logo.png)
 
@@ -33,7 +33,7 @@ Add sources through the CLI:
 
 ```bash
 uv run laminar source add --name "SCMP News" https://www.scmp.com/rss/4/feed/
-uv run laminar source add --name "Example Channel" "https://www.youtube.com/feeds/videos.xml?channel_id=..." --transcript-language en
+uv run laminar source add --name "Example Channel" "https://www.youtube.com/watch?v=USWIF6v6xgY" --transcript-language en --num-items 5
 uv run laminar source add --name "Example on X" https://x.com/example
 uv run laminar source add --name "AI Researchers" https://x.com/i/lists/1234567890
 uv run laminar source show SOURCE_ID
@@ -47,7 +47,9 @@ uv run laminar scan --source youtube
 uv run laminar stats
 ```
 
-`laminar source add` always takes the source URL as a positional argument. When `--type` is omitted, Laminar infers X URLs as `x`, YouTube feed URLs as `youtube`, and treats everything else as `feed`. If you pass `--type`, that explicit value wins. For now, the user-facing CLI only exposes `feed`, `youtube`, and `x`. Every option in `laminar source add --help` includes a description so the command is easier to discover.
+`laminar source add` always takes the source URL as a positional argument. When `--type` is omitted, Laminar infers X URLs as `x`, YouTube URLs as `youtube`, and treats everything else as `feed`. If you pass `--type`, that explicit value wins. For now, the user-facing CLI only exposes `feed`, `youtube`, and `x`. Every option in `laminar source add --help` includes a description so the command is easier to discover.
+
+YouTube sources now use the official YouTube Data API instead of the public XML feed. Set `YOUTUBE_API_KEY` in your environment before adding or scanning YouTube sources. Watch URLs, `/channel/...`, `@handle`, `/user/...`, and legacy `feeds/videos.xml?channel_id=...` URLs are accepted. By default Laminar fetches the latest 5 videos per YouTube scan; override that with `--num-items` when adding the source. During scans, Laminar fetches YouTube uploads one at a time, attempts the transcript immediately, and stops advancing to older videos after the first transcript failure. It also reports transcript failures inline and distinguishes missing transcripts from rate limits and other fetch failures in stored item metadata.
 
 X sources are treated as paid by default, including when the type is inferred from an X URL. Use `--paid` for any other source backed by a paid or metered API. Paid sources are skipped by default during `scan`; pass `--include-paid` when you want to scan them.
 
@@ -61,6 +63,6 @@ For X sources, Laminar resolves the source URL through `xurl` automatically. X l
 
 Pass `-v` or `--verbose` to `laminar scan` when you want detailed progress logging, including the active incremental cutoff and when older entries are skipped because they are at or before that watermark. Use `-i` or `--include-paid` to include paid sources.
 
-`laminar scan` stores the last successful scan time for each source and uses it as an incremental cutoff on later runs. Feed and YouTube scans assume reverse-chronological ordering and stop once they reach older entries; X scans invoke `xurl` for the configured source URL and then filter out items at or before the last successful scan time locally.
+`laminar scan` stores the last successful scan time for each source and uses it as an incremental cutoff on later runs. Feed scans assume reverse-chronological ordering and stop once they reach older entries; YouTube scans walk the channel uploads playlist via the YouTube Data API and stop once they reach older entries; X scans invoke `xurl` for the configured source URL and then filter out items at or before the last successful scan time locally.
 
 `laminar stats` shows an overview of total sources and items, plus approximate logical item size derived from the text stored in SQLite. It also groups counts and size by source kind and by individual source.
