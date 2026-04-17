@@ -32,7 +32,7 @@ def test_x_sources_can_validate_with_feed_url() -> None:
     source = SourceConfig(
         id="x-list",
         kind="x",
-        label="Example List",
+        name="Example List",
         feed_url="https://x.com/i/lists/1234567890",
     )
 
@@ -40,7 +40,7 @@ def test_x_sources_can_validate_with_feed_url() -> None:
 
 
 def test_x_sources_still_require_a_url_or_api_url() -> None:
-    source = SourceConfig(id="x-empty", kind="x", label="Broken X")
+    source = SourceConfig(id="x-empty", kind="x", name="Broken X")
 
     with pytest.raises(
         ConfigError,

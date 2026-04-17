@@ -18,7 +18,7 @@ def new_uuid() -> str:
 class SourceConfig:
     id: str
     kind: str
-    label: str
+    name: str
     enabled: bool = True
     costs_money: bool = False
     feed_url: str | None = None
@@ -67,7 +67,7 @@ class StoredItem:
 @dataclass(slots=True)
 class SourceStats:
     source_id: str
-    label: str
+    name: str
     kind: str
     enabled: bool
     costs_money: bool

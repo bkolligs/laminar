@@ -20,7 +20,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
     source_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
-    label TEXT NOT NULL,
+    name TEXT NOT NULL,
     enabled INTEGER NOT NULL,
     costs_money INTEGER NOT NULL DEFAULT 0,
     feed_url TEXT,
@@ -83,28 +83,12 @@ CREATE INDEX IF NOT EXISTS idx_item_title_map_title
 ON item_title_map(title);
 """
 
-SOURCE_COLUMNS = [
-    "source_id",
-    "kind",
-    "label",
-    "enabled",
-    "costs_money",
-    "feed_url",
-    "handle",
-    "transcript_languages_json",
-    "metadata_json",
-    "last_successful_scan_at",
-    "updated_at",
-]
-
-
 class Repository:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
-            self._ensure_schema_columns(conn)
 
     @contextmanager
     def connect(self):
@@ -121,13 +105,13 @@ class Repository:
             conn.execute(
                 """
                 INSERT INTO sources (
-                    source_id, kind, label, enabled, costs_money, feed_url, handle,
+                    source_id, kind, name, enabled, costs_money, feed_url, handle,
                     transcript_languages_json, metadata_json,
                     last_successful_scan_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
                     kind = excluded.kind,
-                    label = excluded.label,
+                    name = excluded.name,
                     enabled = excluded.enabled,
                     costs_money = excluded.costs_money,
                     feed_url = excluded.feed_url,
@@ -139,7 +123,7 @@ class Repository:
                 (
                     source.id,
                     source.kind,
-                    source.label,
+                    source.name,
                     int(source.enabled),
                     int(source.costs_money),
                     source.feed_url,
@@ -157,7 +141,7 @@ class Repository:
                 SELECT
                     source_id,
                     kind,
-                    label,
+                    name,
                     enabled,
                     costs_money,
                     feed_url,
@@ -178,7 +162,7 @@ class Repository:
                 SELECT
                     source_id,
                     kind,
-                    label,
+                    name,
                     enabled,
                     costs_money,
                     feed_url,
@@ -585,7 +569,7 @@ class Repository:
                 )
                 SELECT
                     s.source_id,
-                    s.label,
+                    s.name,
                     s.kind,
                     s.enabled,
                     s.costs_money,
@@ -596,7 +580,7 @@ class Repository:
                 UNION ALL
                 SELECT
                     sis.source_id,
-                    '[missing source]' AS label,
+                    '[missing source]' AS name,
                     'missing' AS kind,
                     0 AS enabled,
                     0 AS costs_money,
@@ -683,7 +667,7 @@ class Repository:
             sources=[
                 SourceStats(
                     source_id=str(row["source_id"]),
-                    label=str(row["label"]),
+                    name=str(row["name"]),
                     kind=str(row["kind"]),
                     enabled=bool(row["enabled"]),
                     costs_money=bool(row["costs_money"]),
@@ -719,7 +703,7 @@ class Repository:
     def _refresh_title_map_for_title(conn: sqlite3.Connection, title: str) -> None:
         rows = conn.execute(
             """
-            SELECT i.item_id, i.title, COALESCE(s.label, i.source_id) AS source_name
+            SELECT i.item_id, i.title, COALESCE(s.name, i.source_id) AS source_name
             FROM items i
             LEFT JOIN sources s ON s.source_id = i.source_id
             WHERE i.title = ?
@@ -752,94 +736,6 @@ class Repository:
                 (lookup_name, str(row["item_id"])),
             )
 
-
-    @staticmethod
-    def _ensure_schema_columns(conn: sqlite3.Connection) -> None:
-        source_columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
-        }
-
-        if "costs_money" not in source_columns:
-            conn.execute(
-                "ALTER TABLE sources ADD COLUMN costs_money INTEGER NOT NULL DEFAULT 0"
-            )
-        if "last_successful_scan_at" not in source_columns:
-            conn.execute("ALTER TABLE sources ADD COLUMN last_successful_scan_at TEXT")
-        source_columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
-        }
-        if source_columns != set(SOURCE_COLUMNS) or Repository._sources_need_data_migration(
-            conn
-        ):
-            Repository._rebuild_sources_table(conn)
-
-    @staticmethod
-    def _rebuild_sources_table(conn: sqlite3.Connection) -> None:
-        existing_columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
-        }
-        conn.execute("ALTER TABLE sources RENAME TO sources_legacy")
-        conn.execute(
-            """
-            CREATE TABLE sources (
-                source_id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                label TEXT NOT NULL,
-                enabled INTEGER NOT NULL,
-                costs_money INTEGER NOT NULL DEFAULT 0,
-                feed_url TEXT,
-                handle TEXT,
-                transcript_languages_json TEXT NOT NULL DEFAULT '[]',
-                metadata_json TEXT NOT NULL,
-                last_successful_scan_at TEXT,
-                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        conn.execute(
-            f"""
-            INSERT INTO sources ({", ".join(SOURCE_COLUMNS)})
-            SELECT
-                source_id,
-                CASE WHEN kind = 'blog' THEN 'feed' ELSE kind END,
-                label,
-                enabled,
-                CASE
-                    WHEN kind = 'x' THEN 1
-                    ELSE {Repository._source_column_expr(existing_columns, "costs_money", "0")}
-                END,
-                {Repository._source_column_expr(existing_columns, "feed_url", "NULL")},
-                {Repository._source_column_expr(existing_columns, "handle", "NULL")},
-                {Repository._source_column_expr(existing_columns, "transcript_languages_json", "'[]'")},
-                {Repository._source_column_expr(existing_columns, "metadata_json", "'{}'")},
-                {Repository._source_column_expr(existing_columns, "last_successful_scan_at", "NULL")},
-                {Repository._source_column_expr(existing_columns, "updated_at", "CURRENT_TIMESTAMP")}
-            FROM sources_legacy
-            """
-        )
-        conn.execute("DROP TABLE sources_legacy")
-
-    @staticmethod
-    def _source_column_expr(
-        existing_columns: set[str], column_name: str, fallback_sql: str
-    ) -> str:
-        if column_name in existing_columns:
-            return column_name
-        return fallback_sql
-
-    @staticmethod
-    def _sources_need_data_migration(conn: sqlite3.Connection) -> bool:
-        row = conn.execute(
-            """
-            SELECT 1
-            FROM sources
-            WHERE kind = 'blog' OR (kind = 'x' AND costs_money = 0)
-            LIMIT 1
-            """
-        ).fetchone()
-        return row is not None
-
-
 def _row_to_item(row: sqlite3.Row) -> StoredItem:
     return StoredItem(
         item_id=str(row["item_id"]),
@@ -863,7 +759,7 @@ def _row_to_source(row: sqlite3.Row) -> SourceConfig:
     return SourceConfig(
         id=row["source_id"],
         kind=kind,
-        label=row["label"],
+        name=row["name"],
         enabled=bool(row["enabled"]),
         costs_money=bool(row["costs_money"]),
         feed_url=row["feed_url"],

@@ -230,7 +230,7 @@ def _run_source(args: argparse.Namespace) -> int:
         payload = {
             "source_id": source.id,
             "kind": source.kind,
-            "label": source.label,
+            "name": source.name,
             "enabled": source.enabled,
             "costs_money": source.costs_money,
             "feed_url": source.feed_url,
@@ -260,14 +260,14 @@ def _run_source(args: argparse.Namespace) -> int:
     table.add_column("Kind", style="magenta")
     table.add_column("Status")
     table.add_column("Cost")
-    table.add_column("Label", style="bold")
+    table.add_column("Name", style="bold")
     for source in sources:
         table.add_row(
             source.id,
             source.kind,
             "enabled" if source.enabled else "disabled",
             "paid" if source.costs_money else "free",
-            source.label,
+            source.name,
         )
     _console().print(table)
     return 0
@@ -307,14 +307,14 @@ def _run_scan(args: argparse.Namespace) -> int:
     for source in active_sources:
         if source.costs_money and not args.include_paid:
             console.print(
-                f"Skipping {source.id} ({source.label}): paid source; rerun with --include-paid",
+                f"Skipping {source.id} ({source.name}): paid source; rerun with --include-paid",
                 style="grey50",
             )
             total_skipped += 1
             continue
         scan_started_at = datetime.now(timezone.utc)
         scan_id = repo.start_scan(source.id)
-        console.print(f"Scanning {source.id} ({source.label})")
+        console.print(f"Scanning {source.id} ({source.name})")
         if source.costs_money:
             console.print(
                 f"{source.id}: this source uses a paid or metered integration",
@@ -465,7 +465,7 @@ def _run_stats(args: argparse.Namespace) -> int:
 
     source_table = Table(title="Items by Source")
     source_table.add_column("ID", style="cyan")
-    source_table.add_column("Label", style="bold")
+    source_table.add_column("Name", style="bold")
     source_table.add_column("Kind", style="magenta")
     source_table.add_column("Status")
     source_table.add_column("Cost")
@@ -474,7 +474,7 @@ def _run_stats(args: argparse.Namespace) -> int:
     for source in stats.sources:
         source_table.add_row(
             source.source_id,
-            source.label,
+            source.name,
             source.kind,
             "enabled" if source.enabled else "disabled",
             "paid" if source.costs_money else "free",
@@ -537,7 +537,7 @@ def _build_source_from_args(args: argparse.Namespace) -> SourceConfig:
     return SourceConfig(
         id=str(uuid4()),
         kind=normalized_kind,
-        label=args.name,
+        name=args.name,
         enabled=not args.disable,
         costs_money=costs_money,
         feed_url=feed_url,

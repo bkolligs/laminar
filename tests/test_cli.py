@@ -198,7 +198,7 @@ def test_scan_and_query(tmp_path: Path) -> None:
     assert any(source.costs_money for source in repo.list_sources() if source.kind == "x")
 
     source_id = next(
-        source.id for source in repo.list_sources() if source.label == "Example Channel"
+        source.id for source in repo.list_sources() if source.name == "Example Channel"
     )
     source_show_buffer = io.StringIO()
     with redirect_stdout(source_show_buffer):
@@ -207,7 +207,7 @@ def test_scan_and_query(tmp_path: Path) -> None:
     source_shown = json.loads(source_show_buffer.getvalue())
     assert source_shown["source_id"] == source_id
     assert source_shown["kind"] == "youtube"
-    assert source_shown["label"] == "Example Channel"
+    assert source_shown["name"] == "Example Channel"
     assert source_shown["transcript_languages"] == ["en"]
     assert source_shown["item_count"] == 1
     assert source_shown["logical_item_size_bytes"] > 0
@@ -277,13 +277,13 @@ def test_scan_continues_after_source_failure_and_reports_item_statuses(
     failing = SourceConfig(
         id="bad-source",
         kind="feed",
-        label="Broken Feed",
+        name="Broken Feed",
         feed_url="https://example.invalid/feed.xml",
     )
     healthy = SourceConfig(
         id="good-source",
         kind="x",
-        label="Healthy Feed",
+        name="Healthy Feed",
         costs_money=True,
         handle="healthy",
         feed_url="https://x.com/healthy",
@@ -387,7 +387,7 @@ def test_scan_skips_paid_sources_without_include_paid(tmp_path: Path) -> None:
         SourceConfig(
             id="paid-source",
             kind="x",
-            label="Paid X",
+            name="Paid X",
             costs_money=True,
             handle="example",
             feed_url="https://x.com/example",
@@ -538,7 +538,7 @@ def test_scan_uses_last_successful_scan_time_for_incremental_blog_and_youtube(
                 assert run(args) == 0
 
         repo = Repository(db_path)
-        sources_by_label = {source.label: source.id for source in repo.list_sources()}
+        sources_by_label = {source.name: source.id for source in repo.list_sources()}
         cutoff = datetime(2026, 4, 14, 12, 30, tzinfo=timezone.utc)
         blog_source_id = sources_by_label["Example Feed"]
         youtube_source_id = sources_by_label["Example Channel"]
@@ -608,7 +608,7 @@ def test_scan_filters_x_items_using_last_successful_scan_time(tmp_path: Path) ->
         assert run(args) == 0
 
     repo = Repository(db_path)
-    source_id = next(source.id for source in repo.list_sources() if source.label == "Example X")
+    source_id = next(source.id for source in repo.list_sources() if source.name == "Example X")
     cutoff = datetime(2026, 4, 14, 12, 30, tzinfo=timezone.utc)
     repo.mark_source_scan_succeeded(source_id, cutoff)
 
@@ -720,7 +720,7 @@ def test_scan_verbose_reports_incremental_cutoffs_and_skipped_items(
             assert run(args) == 0
 
     repo = Repository(db_path)
-    sources_by_label = {source.label: source.id for source in repo.list_sources()}
+    sources_by_label = {source.name: source.id for source in repo.list_sources()}
     cutoff = datetime(2026, 4, 14, 12, 30, tzinfo=timezone.utc)
     repo.mark_source_scan_succeeded(sources_by_label["Example Feed"], cutoff)
     repo.mark_source_scan_succeeded(sources_by_label["Example X"], cutoff)
@@ -775,7 +775,7 @@ def test_scan_records_scan_start_as_success_watermark(tmp_path: Path) -> None:
         SourceConfig(
             id="blog-source",
             kind="feed",
-            label="Example Feed",
+            name="Example Feed",
             feed_url="https://example.com/feed.xml",
         )
     )
@@ -837,20 +837,20 @@ def test_scan_can_filter_by_source_kind(tmp_path: Path) -> None:
     blog_source = SourceConfig(
         id="blog-source",
         kind="feed",
-        label="Example Feed",
+        name="Example Feed",
         feed_url="https://example.com/feed.xml",
     )
     youtube_source = SourceConfig(
         id="youtube-source",
         kind="youtube",
-        label="Example Channel",
+        name="Example Channel",
         feed_url="https://example.com/youtube.xml",
         transcript_languages=["en"],
     )
     x_source = SourceConfig(
         id="x-source",
         kind="x",
-        label="Example X",
+        name="Example X",
         costs_money=True,
         handle="example",
         feed_url="https://x.com/example",
@@ -885,7 +885,7 @@ def test_scan_can_filter_by_source_kind(tmp_path: Path) -> None:
                     external_id=f"{source.id}-1",
                     canonical_url=f"https://example.com/{source.id}/1",
                     title=self.title,
-                    author=source.label,
+                    author=source.name,
                     published_at=None,
                     excerpt=self.title,
                     content_text=self.title,
@@ -925,7 +925,7 @@ def test_scan_can_combine_source_kind_and_source_id_filters(tmp_path: Path) -> N
         SourceConfig(
             id="blog-source",
             kind="feed",
-            label="Example Feed",
+            name="Example Feed",
             feed_url="https://example.com/feed.xml",
         )
     )
@@ -933,7 +933,7 @@ def test_scan_can_combine_source_kind_and_source_id_filters(tmp_path: Path) -> N
         SourceConfig(
             id="youtube-source",
             kind="youtube",
-            label="Example Channel",
+            name="Example Channel",
             feed_url="https://example.com/youtube.xml",
         )
     )
@@ -955,7 +955,7 @@ def test_scan_can_combine_source_kind_and_source_id_filters(tmp_path: Path) -> N
                     external_id="item-1",
                     canonical_url=f"https://example.com/{source.id}/1",
                     title="Matched item",
-                    author=source.label,
+                    author=source.name,
                     published_at=None,
                     excerpt="Matched item",
                     content_text="Matched item",
@@ -1298,6 +1298,7 @@ def test_source_add_help_uses_url_type_and_paid_flags(capsys) -> None:
     assert "Defaults to en." in help_text
     assert "{feed,youtube,x}" in help_text
     assert "blog" not in help_text
+    assert "\"label\"" not in help_text
     assert "--label" not in help_text
     assert "--kind" not in help_text
     assert "--feed-url" not in help_text
@@ -1310,7 +1311,7 @@ def test_source_remove_deletes_source_without_items(tmp_path: Path) -> None:
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
     repo = Repository(db_path)
-    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", name="Example Feed"))
 
     with redirect_stdout(io.StringIO()) as buffer:
         remove_args = parser.parse_args(["--db", str(db_path), "source", "remove", "feed-1"])
@@ -1326,7 +1327,7 @@ def test_source_remove_rejects_non_recursive_delete_when_items_exist(
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
     repo = Repository(db_path)
-    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", name="Example Feed"))
     repo.upsert_item(
         NormalizedItem(
             source_id="feed-1",
@@ -1354,7 +1355,7 @@ def test_source_remove_recursive_deletes_source_and_items(tmp_path: Path) -> Non
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
     repo = Repository(db_path)
-    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", name="Example Feed"))
     repo.upsert_item(
         NormalizedItem(
             source_id="feed-1",
@@ -1593,8 +1594,8 @@ def test_items_show_rejects_ambiguous_title(tmp_path: Path, capsys) -> None:
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
     repo = Repository(db_path)
-    repo.upsert_source(SourceConfig(id="yt-a", kind="youtube", label="Channel A"))
-    repo.upsert_source(SourceConfig(id="yt-b", kind="youtube", label="Channel B"))
+    repo.upsert_source(SourceConfig(id="yt-a", kind="youtube", name="Channel A"))
+    repo.upsert_source(SourceConfig(id="yt-b", kind="youtube", name="Channel B"))
     for suffix in ("a", "b"):
         repo.upsert_item(
             NormalizedItem(

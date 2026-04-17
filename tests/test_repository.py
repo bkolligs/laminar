@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 from pathlib import Path
-import sqlite3
 from uuid import UUID
 
 import pytest
@@ -15,7 +14,7 @@ def test_persists_source_config_round_trip(tmp_path: Path) -> None:
         SourceConfig(
             id="yt-1",
             kind="youtube",
-            label="Example Channel",
+            name="Example Channel",
             enabled=False,
             costs_money=True,
             feed_url="https://www.youtube.com/feeds/videos.xml?channel_id=123",
@@ -34,226 +33,9 @@ def test_persists_source_config_round_trip(tmp_path: Path) -> None:
     assert sources[0].metadata["region"] == "us"
 
 
-def test_adds_costs_money_column_for_existing_databases(tmp_path: Path) -> None:
-    db_path = tmp_path / "laminar.db"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE sources (
-            source_id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            label TEXT NOT NULL,
-            enabled INTEGER NOT NULL,
-            feed_url TEXT,
-            handle TEXT,
-            transcript_languages_json TEXT NOT NULL DEFAULT '[]',
-            metadata_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    repo = Repository(db_path)
-    repo.upsert_source(SourceConfig(id="x-1", kind="x", label="Paid X", costs_money=True))
-
-    sources = repo.list_sources()
-
-    assert len(sources) == 1
-    assert sources[0].costs_money is True
-
-
-def test_adds_last_successful_scan_column_for_existing_databases(tmp_path: Path) -> None:
-    db_path = tmp_path / "laminar.db"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE sources (
-            source_id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            label TEXT NOT NULL,
-            enabled INTEGER NOT NULL,
-            costs_money INTEGER NOT NULL DEFAULT 0,
-            feed_url TEXT,
-            handle TEXT,
-            transcript_languages_json TEXT NOT NULL DEFAULT '[]',
-            metadata_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    repo = Repository(db_path)
-
-    with repo.connect() as conn:
-        columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
-        }
-
-    assert "last_successful_scan_at" in columns
-
-
-def test_migrates_sources_table_to_clean_schema(tmp_path: Path) -> None:
-    db_path = tmp_path / "laminar.db"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE sources (
-            source_id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            label TEXT NOT NULL,
-            enabled INTEGER NOT NULL,
-            provider TEXT,
-            feed_url TEXT,
-            handle TEXT,
-            command_json TEXT NOT NULL DEFAULT '[]',
-            transcript_languages_json TEXT NOT NULL DEFAULT '[]',
-            poll_interval_minutes INTEGER,
-            metadata_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        INSERT INTO sources (
-            source_id, kind, label, enabled, provider, feed_url, handle,
-            command_json, transcript_languages_json, poll_interval_minutes, metadata_json
-        ) VALUES (
-            'yt-1', 'youtube', 'Example Channel', 1, 'youtube',
-            'https://www.youtube.com/feeds/videos.xml?channel_id=123', '@example',
-            '["unused"]', '["en"]', 30, '{"region":"us"}'
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    repo = Repository(db_path)
-
-    with repo.connect() as conn:
-        columns = [
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
-        ]
-
-    assert columns == [
-        "source_id",
-        "kind",
-        "label",
-        "enabled",
-        "costs_money",
-        "feed_url",
-        "handle",
-        "transcript_languages_json",
-        "metadata_json",
-        "last_successful_scan_at",
-        "updated_at",
-    ]
-
-    source = repo.get_source("yt-1")
-    assert source is not None
-    assert source.kind == "youtube"
-    assert source.label == "Example Channel"
-    assert source.enabled is True
-    assert source.costs_money is False
-    assert source.feed_url == "https://www.youtube.com/feeds/videos.xml?channel_id=123"
-    assert source.handle == "@example"
-    assert source.transcript_languages == ["en"]
-    assert source.metadata == {"region": "us"}
-
-
-def test_x_sources_are_treated_as_paid_when_loading_legacy_rows(tmp_path: Path) -> None:
-    db_path = tmp_path / "laminar.db"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE sources (
-            source_id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            label TEXT NOT NULL,
-            enabled INTEGER NOT NULL,
-            costs_money INTEGER NOT NULL DEFAULT 0,
-            feed_url TEXT,
-            handle TEXT,
-            transcript_languages_json TEXT NOT NULL DEFAULT '[]',
-            metadata_json TEXT NOT NULL,
-            last_successful_scan_at TEXT,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        INSERT INTO sources (
-            source_id, kind, label, enabled, costs_money, feed_url, handle,
-            transcript_languages_json, metadata_json
-        ) VALUES (
-            'x-legacy', 'x', 'Jeremy Howard', 1, 0, NULL, 'jeremyphoward', '[]', '{}'
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    repo = Repository(db_path)
-
-    sources = repo.list_sources()
-
-    assert len(sources) == 1
-    assert sources[0].kind == "x"
-    assert sources[0].costs_money is True
-    with repo.connect() as conn:
-        stored = conn.execute(
-            "SELECT kind, costs_money FROM sources WHERE source_id = ?",
-            ("x-legacy",),
-        ).fetchone()
-    assert stored is not None
-    assert stored["kind"] == "x"
-    assert stored["costs_money"] == 1
-
-
-def test_legacy_blog_sources_load_as_feed(tmp_path: Path) -> None:
-    db_path = tmp_path / "laminar.db"
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE sources (
-            source_id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            label TEXT NOT NULL,
-            enabled INTEGER NOT NULL,
-            costs_money INTEGER NOT NULL DEFAULT 0,
-            feed_url TEXT,
-            handle TEXT,
-            transcript_languages_json TEXT NOT NULL DEFAULT '[]',
-            metadata_json TEXT NOT NULL,
-            last_successful_scan_at TEXT,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        INSERT INTO sources (
-            source_id, kind, label, enabled, costs_money, feed_url, handle,
-            transcript_languages_json, metadata_json
-        ) VALUES (
-            'blog-legacy', 'blog', 'Legacy Blog', 1, 0, 'https://example.com/feed.xml', NULL, '[]', '{}'
-        );
-        """
-    )
-    conn.commit()
-    conn.close()
-
-    repo = Repository(db_path)
-
-    sources = repo.list_sources()
-
-    assert len(sources) == 1
-    assert sources[0].kind == "feed"
-    with repo.connect() as conn:
-        stored = conn.execute(
-            "SELECT kind FROM sources WHERE source_id = ?",
-            ("blog-legacy",),
-        ).fetchone()
-    assert stored is not None
-    assert stored["kind"] == "feed"
-
-
 def test_records_last_successful_scan_time(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
-    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", name="Example Feed"))
 
     scanned_at = datetime(2026, 4, 14, 18, 30, tzinfo=timezone.utc)
     repo.mark_source_scan_succeeded("feed-1", scanned_at)
@@ -268,7 +50,7 @@ def test_get_source_returns_full_source_details(tmp_path: Path) -> None:
         SourceConfig(
             id="yt-1",
             kind="youtube",
-            label="Example Channel",
+            name="Example Channel",
             enabled=False,
             costs_money=True,
             feed_url="https://www.youtube.com/feeds/videos.xml?channel_id=123",
@@ -283,7 +65,7 @@ def test_get_source_returns_full_source_details(tmp_path: Path) -> None:
 
     assert source is not None
     assert source.id == "yt-1"
-    assert source.label == "Example Channel"
+    assert source.name == "Example Channel"
     assert source.enabled is False
     assert source.costs_money is True
     assert source.feed_url == "https://www.youtube.com/feeds/videos.xml?channel_id=123"
@@ -295,13 +77,13 @@ def test_get_source_returns_full_source_details(tmp_path: Path) -> None:
 
 def test_stats_reports_totals_by_source_and_kind(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
-    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
-    repo.upsert_source(SourceConfig(id="yt-1", kind="youtube", label="Example Channel"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", name="Example Feed"))
+    repo.upsert_source(SourceConfig(id="yt-1", kind="youtube", name="Example Channel"))
     repo.upsert_source(
         SourceConfig(
             id="x-1",
             kind="x",
-            label="Example X",
+            name="Example X",
             costs_money=True,
             enabled=False,
         )
@@ -375,7 +157,7 @@ def test_stats_reports_totals_by_source_and_kind(tmp_path: Path) -> None:
 
 def test_stats_include_items_without_matching_source(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
-    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", name="Example Feed"))
     repo.upsert_item(
         NormalizedItem(
             source_id="feed-1",
@@ -410,7 +192,7 @@ def test_stats_include_items_without_matching_source(tmp_path: Path) -> None:
     assert stats.total_sources == 1
     assert stats.total_items == 2
     assert "missing-source" in sources_by_id
-    assert sources_by_id["missing-source"].label == "[missing source]"
+    assert sources_by_id["missing-source"].name == "[missing source]"
     assert sources_by_id["missing-source"].kind == "missing"
     assert sources_by_id["missing-source"].enabled is False
     assert sources_by_id["missing-source"].costs_money is False
@@ -423,7 +205,7 @@ def test_stats_include_items_without_matching_source(tmp_path: Path) -> None:
 
 def test_remove_source_requires_recursive_when_items_exist(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
-    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", name="Example Feed"))
     repo.upsert_item(
         NormalizedItem(
             source_id="feed-1",
@@ -447,7 +229,7 @@ def test_remove_source_requires_recursive_when_items_exist(tmp_path: Path) -> No
 
 def test_remove_source_recursive_deletes_source_items_and_scans(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
-    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", label="Example Feed"))
+    repo.upsert_source(SourceConfig(id="feed-1", kind="feed", name="Example Feed"))
     repo.start_scan("feed-1")
     repo.upsert_item(
         NormalizedItem(
@@ -462,7 +244,7 @@ def test_remove_source_recursive_deletes_source_items_and_scans(tmp_path: Path) 
             content_text="One",
         )
     )
-    repo.upsert_source(SourceConfig(id="feed-2", kind="feed", label="Other Feed"))
+    repo.upsert_source(SourceConfig(id="feed-2", kind="feed", name="Other Feed"))
     repo.upsert_item(
         NormalizedItem(
             source_id="feed-2",
@@ -681,8 +463,8 @@ def test_find_items_by_title_returns_exact_matches(tmp_path: Path) -> None:
 
 def test_remove_item_deletes_content_and_refreshes_title_map(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
-    repo.upsert_source(SourceConfig(id="yt-1", kind="youtube", label="Channel One"))
-    repo.upsert_source(SourceConfig(id="yt-2", kind="youtube", label="Channel Two"))
+    repo.upsert_source(SourceConfig(id="yt-1", kind="youtube", name="Channel One"))
+    repo.upsert_source(SourceConfig(id="yt-2", kind="youtube", name="Channel Two"))
     repo.upsert_item(
         NormalizedItem(
             item_id="item-1",
@@ -738,7 +520,7 @@ def test_title_map_updates_when_item_title_changes(tmp_path: Path) -> None:
         SourceConfig(
             id="yt-1",
             kind="youtube",
-            label="Channel One",
+            name="Channel One",
         )
     )
     item = NormalizedItem(
@@ -776,8 +558,8 @@ def test_title_map_updates_when_item_title_changes(tmp_path: Path) -> None:
 
 def test_title_map_uses_source_name_for_collisions(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
-    repo.upsert_source(SourceConfig(id="yt-1", kind="youtube", label="Channel One"))
-    repo.upsert_source(SourceConfig(id="yt-2", kind="youtube", label="Channel Two"))
+    repo.upsert_source(SourceConfig(id="yt-1", kind="youtube", name="Channel One"))
+    repo.upsert_source(SourceConfig(id="yt-2", kind="youtube", name="Channel Two"))
     repo.upsert_item(
         NormalizedItem(
             source_id="yt-1",
