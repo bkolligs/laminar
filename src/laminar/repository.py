@@ -6,22 +6,26 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from laminar.models import NormalizedItem, SourceConfig, StoredItem
+from laminar.models import (
+    NormalizedItem,
+    RepositoryStats,
+    SourceConfig,
+    SourceKindStats,
+    SourceStats,
+    StoredItem,
+)
 
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
     source_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
-    label TEXT NOT NULL,
+    name TEXT NOT NULL,
     enabled INTEGER NOT NULL,
     costs_money INTEGER NOT NULL DEFAULT 0,
-    provider TEXT,
     feed_url TEXT,
     handle TEXT,
-    command_json TEXT NOT NULL DEFAULT '[]',
     transcript_languages_json TEXT NOT NULL DEFAULT '[]',
-    poll_interval_minutes INTEGER,
     metadata_json TEXT NOT NULL,
     last_successful_scan_at TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -79,14 +83,12 @@ CREATE INDEX IF NOT EXISTS idx_item_title_map_title
 ON item_title_map(title);
 """
 
-
 class Repository:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
-            self._ensure_schema_columns(conn)
 
     @contextmanager
     def connect(self):
@@ -103,36 +105,30 @@ class Repository:
             conn.execute(
                 """
                 INSERT INTO sources (
-                    source_id, kind, label, enabled, costs_money, provider, feed_url, handle,
-                    command_json, transcript_languages_json, poll_interval_minutes, metadata_json,
+                    source_id, kind, name, enabled, costs_money, feed_url, handle,
+                    transcript_languages_json, metadata_json,
                     last_successful_scan_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
                     kind = excluded.kind,
-                    label = excluded.label,
+                    name = excluded.name,
                     enabled = excluded.enabled,
                     costs_money = excluded.costs_money,
-                    provider = excluded.provider,
                     feed_url = excluded.feed_url,
                     handle = excluded.handle,
-                    command_json = excluded.command_json,
                     transcript_languages_json = excluded.transcript_languages_json,
-                    poll_interval_minutes = excluded.poll_interval_minutes,
                     metadata_json = excluded.metadata_json,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
                     source.id,
                     source.kind,
-                    source.label,
+                    source.name,
                     int(source.enabled),
                     int(source.costs_money),
-                    source.provider,
                     source.feed_url,
                     source.handle,
-                    json.dumps(source.command),
                     json.dumps(source.transcript_languages),
-                    source.poll_interval_minutes,
                     json.dumps(source.metadata, sort_keys=True),
                     self.last_successful_scan_at(source.id),
                 ),
@@ -145,15 +141,12 @@ class Repository:
                 SELECT
                     source_id,
                     kind,
-                    label,
+                    name,
                     enabled,
                     costs_money,
-                    provider,
                     feed_url,
                     handle,
-                    command_json,
                     transcript_languages_json,
-                    poll_interval_minutes,
                     metadata_json,
                     last_successful_scan_at
                 FROM sources
@@ -161,6 +154,64 @@ class Repository:
                 """
             ).fetchall()
         return [_row_to_source(row) for row in rows]
+
+    def get_source(self, source_id: str) -> SourceConfig | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    source_id,
+                    kind,
+                    name,
+                    enabled,
+                    costs_money,
+                    feed_url,
+                    handle,
+                    transcript_languages_json,
+                    metadata_json,
+                    last_successful_scan_at
+                FROM sources
+                WHERE source_id = ?
+                """,
+                (source_id,),
+            ).fetchone()
+        return _row_to_source(row) if row else None
+
+    def remove_source(self, source_id: str, *, recursive: bool = False) -> int | None:
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM sources WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+
+            item_rows = conn.execute(
+                "SELECT item_id, title FROM items WHERE source_id = ?",
+                (source_id,),
+            ).fetchall()
+            if item_rows and not recursive:
+                raise ValueError(
+                    f"Source {source_id} still has {len(item_rows)} items; rerun with --recursive"
+                )
+
+            for row in item_rows:
+                conn.execute(
+                    "DELETE FROM item_contents WHERE item_id = ?",
+                    (str(row["item_id"]),),
+                )
+                conn.execute(
+                    "DELETE FROM item_title_map WHERE item_id = ?",
+                    (str(row["item_id"]),),
+                )
+            if item_rows:
+                conn.execute("DELETE FROM items WHERE source_id = ?", (source_id,))
+                for title in {str(row["title"]) for row in item_rows}:
+                    self._refresh_title_map_for_title(conn, title)
+
+            conn.execute("DELETE FROM scans WHERE source_id = ?", (source_id,))
+            conn.execute("DELETE FROM sources WHERE source_id = ?", (source_id,))
+            return len(item_rows)
 
     def last_successful_scan_at(self, source_id: str) -> datetime | None:
         with self.connect() as conn:
@@ -352,6 +403,22 @@ class Repository:
             ).fetchone()
         return _row_to_item(row) if row else None
 
+    def remove_item(self, item_id: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT title FROM items WHERE item_id = ?",
+                (item_id,),
+            ).fetchone()
+            if row is None:
+                return False
+
+            title = str(row["title"])
+            conn.execute("DELETE FROM item_contents WHERE item_id = ?", (item_id,))
+            conn.execute("DELETE FROM item_title_map WHERE item_id = ?", (item_id,))
+            conn.execute("DELETE FROM items WHERE item_id = ?", (item_id,))
+            self._refresh_title_map_for_title(conn, title)
+            return True
+
     def find_items_by_id_prefix(self, prefix: str, *, limit: int = 10) -> list[StoredItem]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -441,6 +508,185 @@ class Repository:
             ).fetchall()
         return [_row_to_item(row) for row in rows]
 
+    def stats(self) -> RepositoryStats:
+        with self.connect() as conn:
+            totals = conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM sources) AS total_sources,
+                    (SELECT COUNT(*) FROM items) AS total_items,
+                    (
+                        SELECT COALESCE(SUM(
+                            length(CAST(i.item_id AS BLOB)) +
+                            length(CAST(i.source_id AS BLOB)) +
+                            length(CAST(i.item_type AS BLOB)) +
+                            length(CAST(COALESCE(i.external_id, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.canonical_url, '') AS BLOB)) +
+                            length(CAST(i.title AS BLOB)) +
+                            length(CAST(COALESCE(i.author, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.published_at, '') AS BLOB)) +
+                            length(CAST(i.retrieved_at AS BLOB)) +
+                            length(CAST(COALESCE(i.excerpt, '') AS BLOB)) +
+                            length(CAST(i.content_status AS BLOB)) +
+                            length(CAST(COALESCE(i.content_language, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.content_source, '') AS BLOB)) +
+                            length(CAST(i.raw_payload_json AS BLOB)) +
+                            length(CAST(i.content_hash AS BLOB)) +
+                            length(CAST(COALESCE(c.content_text, '') AS BLOB))
+                        ), 0)
+                        FROM items i
+                        LEFT JOIN item_contents c ON c.item_id = i.item_id
+                    ) AS total_size_bytes
+                """
+            ).fetchone()
+            source_rows = conn.execute(
+                """
+                WITH source_item_stats AS (
+                    SELECT
+                        i.source_id,
+                        COUNT(i.item_id) AS item_count,
+                        COALESCE(SUM(
+                            length(CAST(i.item_id AS BLOB)) +
+                            length(CAST(i.source_id AS BLOB)) +
+                            length(CAST(i.item_type AS BLOB)) +
+                            length(CAST(COALESCE(i.external_id, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.canonical_url, '') AS BLOB)) +
+                            length(CAST(i.title AS BLOB)) +
+                            length(CAST(COALESCE(i.author, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.published_at, '') AS BLOB)) +
+                            length(CAST(i.retrieved_at AS BLOB)) +
+                            length(CAST(COALESCE(i.excerpt, '') AS BLOB)) +
+                            length(CAST(i.content_status AS BLOB)) +
+                            length(CAST(COALESCE(i.content_language, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.content_source, '') AS BLOB)) +
+                            length(CAST(i.raw_payload_json AS BLOB)) +
+                            length(CAST(i.content_hash AS BLOB)) +
+                            length(CAST(COALESCE(c.content_text, '') AS BLOB))
+                        ), 0) AS size_bytes
+                    FROM items i
+                    LEFT JOIN item_contents c ON c.item_id = i.item_id
+                    GROUP BY i.source_id
+                )
+                SELECT
+                    s.source_id,
+                    s.name,
+                    s.kind,
+                    s.enabled,
+                    s.costs_money,
+                    COALESCE(sis.item_count, 0) AS item_count,
+                    COALESCE(sis.size_bytes, 0) AS size_bytes
+                FROM sources s
+                LEFT JOIN source_item_stats sis ON sis.source_id = s.source_id
+                UNION ALL
+                SELECT
+                    sis.source_id,
+                    '[missing source]' AS name,
+                    'missing' AS kind,
+                    0 AS enabled,
+                    0 AS costs_money,
+                    sis.item_count,
+                    sis.size_bytes
+                FROM source_item_stats sis
+                LEFT JOIN sources s ON s.source_id = sis.source_id
+                WHERE s.source_id IS NULL
+                ORDER BY 6 DESC, 7 DESC, 1
+                """
+            ).fetchall()
+            kind_rows = conn.execute(
+                """
+                WITH source_rollups AS (
+                    SELECT
+                        s.source_id,
+                        s.kind,
+                        COUNT(i.item_id) AS item_count,
+                        COALESCE(SUM(
+                            length(CAST(i.item_id AS BLOB)) +
+                            length(CAST(i.source_id AS BLOB)) +
+                            length(CAST(i.item_type AS BLOB)) +
+                            length(CAST(COALESCE(i.external_id, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.canonical_url, '') AS BLOB)) +
+                            length(CAST(i.title AS BLOB)) +
+                            length(CAST(COALESCE(i.author, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.published_at, '') AS BLOB)) +
+                            length(CAST(i.retrieved_at AS BLOB)) +
+                            length(CAST(COALESCE(i.excerpt, '') AS BLOB)) +
+                            length(CAST(i.content_status AS BLOB)) +
+                            length(CAST(COALESCE(i.content_language, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.content_source, '') AS BLOB)) +
+                            length(CAST(i.raw_payload_json AS BLOB)) +
+                            length(CAST(i.content_hash AS BLOB)) +
+                            length(CAST(COALESCE(c.content_text, '') AS BLOB))
+                        ), 0) AS size_bytes
+                    FROM sources s
+                    LEFT JOIN items i ON i.source_id = s.source_id
+                    LEFT JOIN item_contents c ON c.item_id = i.item_id
+                    GROUP BY s.source_id, s.kind
+                    UNION ALL
+                    SELECT
+                        i.source_id,
+                        'missing' AS kind,
+                        COUNT(i.item_id) AS item_count,
+                        COALESCE(SUM(
+                            length(CAST(i.item_id AS BLOB)) +
+                            length(CAST(i.source_id AS BLOB)) +
+                            length(CAST(i.item_type AS BLOB)) +
+                            length(CAST(COALESCE(i.external_id, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.canonical_url, '') AS BLOB)) +
+                            length(CAST(i.title AS BLOB)) +
+                            length(CAST(COALESCE(i.author, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.published_at, '') AS BLOB)) +
+                            length(CAST(i.retrieved_at AS BLOB)) +
+                            length(CAST(COALESCE(i.excerpt, '') AS BLOB)) +
+                            length(CAST(i.content_status AS BLOB)) +
+                            length(CAST(COALESCE(i.content_language, '') AS BLOB)) +
+                            length(CAST(COALESCE(i.content_source, '') AS BLOB)) +
+                            length(CAST(i.raw_payload_json AS BLOB)) +
+                            length(CAST(i.content_hash AS BLOB)) +
+                            length(CAST(COALESCE(c.content_text, '') AS BLOB))
+                        ), 0) AS size_bytes
+                    FROM items i
+                    LEFT JOIN item_contents c ON c.item_id = i.item_id
+                    LEFT JOIN sources s ON s.source_id = i.source_id
+                    WHERE s.source_id IS NULL
+                    GROUP BY i.source_id
+                )
+                SELECT
+                    kind,
+                    COUNT(*) AS source_count,
+                    SUM(item_count) AS item_count,
+                    SUM(size_bytes) AS size_bytes
+                FROM source_rollups
+                GROUP BY kind
+                ORDER BY 2 DESC, 4 DESC, 1
+                """
+            ).fetchall()
+        return RepositoryStats(
+            total_sources=int(totals["total_sources"]),
+            total_items=int(totals["total_items"]),
+            total_size_bytes=int(totals["total_size_bytes"]),
+            sources=[
+                SourceStats(
+                    source_id=str(row["source_id"]),
+                    name=str(row["name"]),
+                    kind=str(row["kind"]),
+                    enabled=bool(row["enabled"]),
+                    costs_money=bool(row["costs_money"]),
+                    item_count=int(row["item_count"]),
+                    size_bytes=int(row["size_bytes"]),
+                )
+                for row in source_rows
+            ],
+            kinds=[
+                SourceKindStats(
+                    kind=str(row["kind"]),
+                    source_count=int(row["source_count"]),
+                    item_count=int(row["item_count"]),
+                    size_bytes=int(row["size_bytes"]),
+                )
+                for row in kind_rows
+            ],
+        )
+
     @staticmethod
     def _content_hash(item: NormalizedItem) -> str:
         parts = [
@@ -457,7 +703,7 @@ class Repository:
     def _refresh_title_map_for_title(conn: sqlite3.Connection, title: str) -> None:
         rows = conn.execute(
             """
-            SELECT i.item_id, i.title, COALESCE(s.label, i.source_id) AS source_name
+            SELECT i.item_id, i.title, COALESCE(s.name, i.source_id) AS source_name
             FROM items i
             LEFT JOIN sources s ON s.source_id = i.source_id
             WHERE i.title = ?
@@ -490,20 +736,6 @@ class Repository:
                 (lookup_name, str(row["item_id"])),
             )
 
-
-    @staticmethod
-    def _ensure_schema_columns(conn: sqlite3.Connection) -> None:
-        source_columns = {
-            str(row["name"]) for row in conn.execute("PRAGMA table_info(sources)").fetchall()
-        }
-        if "costs_money" not in source_columns:
-            conn.execute(
-                "ALTER TABLE sources ADD COLUMN costs_money INTEGER NOT NULL DEFAULT 0"
-            )
-        if "last_successful_scan_at" not in source_columns:
-            conn.execute("ALTER TABLE sources ADD COLUMN last_successful_scan_at TEXT")
-
-
 def _row_to_item(row: sqlite3.Row) -> StoredItem:
     return StoredItem(
         item_id=str(row["item_id"]),
@@ -527,16 +759,14 @@ def _row_to_source(row: sqlite3.Row) -> SourceConfig:
     return SourceConfig(
         id=row["source_id"],
         kind=kind,
-        label=row["label"],
+        name=row["name"],
         enabled=bool(row["enabled"]),
-        costs_money=bool(row["costs_money"]) or kind == "x",
-        provider=row["provider"],
+        costs_money=bool(row["costs_money"]),
         feed_url=row["feed_url"],
         handle=row["handle"],
-        command=_json_list(row["command_json"]),
         transcript_languages=_json_list(row["transcript_languages_json"]),
-        poll_interval_minutes=row["poll_interval_minutes"],
         metadata=_json_object(row["metadata_json"]),
+        last_successful_scan_at=_parse_dt(row["last_successful_scan_at"]),
     )
 
 
