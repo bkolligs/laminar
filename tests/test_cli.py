@@ -1157,6 +1157,29 @@ def test_youtube_urls_infer_youtube_kind(tmp_path: Path) -> None:
     assert sources[0].transcript_languages == ["en"]
 
 
+def test_regular_youtube_urls_do_not_infer_youtube_kind(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+
+    add_args = parser.parse_args(
+        [
+            "--db",
+            str(db_path),
+            "source",
+            "add",
+            "--name",
+            "Example Video",
+            "https://www.youtube.com/watch?v=abc123",
+        ]
+    )
+    assert run(add_args) == 0
+
+    sources = Repository(db_path).list_sources()
+    assert len(sources) == 1
+    assert sources[0].kind == "feed"
+    assert sources[0].transcript_languages == []
+
+
 def test_youtube_sources_default_transcript_language_to_english(tmp_path: Path) -> None:
     parser = build_parser()
     db_path = tmp_path / "laminar.db"

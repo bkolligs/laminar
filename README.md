@@ -47,7 +47,7 @@ uv run laminar scan --source youtube
 uv run laminar stats
 ```
 
-`laminar source add` always takes the source URL as a positional argument. When `--type` is omitted, Laminar infers X URLs as `x`, YouTube URLs as `youtube`, and treats everything else as `feed`. If you pass `--type`, that explicit value wins. For now, the user-facing CLI only exposes `feed`, `youtube`, and `x`. Every option in `laminar source add --help` includes a description so the command is easier to discover.
+`laminar source add` always takes the source URL as a positional argument. When `--type` is omitted, Laminar infers X URLs as `x`, YouTube feed URLs as `youtube`, and treats everything else as `feed`. If you pass `--type`, that explicit value wins. For now, the user-facing CLI only exposes `feed`, `youtube`, and `x`. Every option in `laminar source add --help` includes a description so the command is easier to discover.
 
 X sources are treated as paid by default, including when the type is inferred from an X URL. Use `--paid` for any other source backed by a paid or metered API. Paid sources are skipped by default during `scan`; pass `--include-paid` when you want to scan them.
 

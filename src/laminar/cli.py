@@ -568,7 +568,7 @@ def _resolve_source_kind(url: str, explicit_kind: str | None) -> str:
     host = parsed.netloc.lower()
     if host.endswith("x.com"):
         return "x"
-    if host.endswith("youtube.com") or host == "youtu.be":
+    if host.endswith("youtube.com") and parsed.path == "/feeds/videos.xml":
         return "youtube"
     return "feed"
 
