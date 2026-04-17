@@ -1,5 +1,7 @@
 # Laminar
 
+> Never look at an algorithmic feed that you don't control again
+
 ![Laminar logo](assets/laminar-logo.png)
 
 Laminar is a local-first CLI for ingesting updates from feeds, YouTube channels, X accounts, and X lists into SQLite for deterministic retrieval by a downstream agent.
