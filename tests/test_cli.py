@@ -7,12 +7,16 @@ from pathlib import Path
 from urllib.error import HTTPError
 from uuid import UUID
 
+import pytest
+import yaml
+
 import laminar.adapters as adapters
 import laminar.cli as cli
 from laminar.cli import build_parser, run
-from laminar.models import NormalizedItem, SourceConfig
+from laminar.config import ConfigError
+from laminar.models import ContentStatus, NormalizedItem, SourceConfig
 from laminar.repository import Repository
-from laminar.youtube import TranscriptResult, TranscriptSegment
+from laminar.youtube import TranscriptResult, TranscriptSegment, TranscriptUnavailable
 
 
 def test_scan_and_query(tmp_path: Path) -> None:
@@ -195,7 +199,7 @@ def test_scan_and_query(tmp_path: Path) -> None:
     assert "market update" in shown["content_text"]
     assert shown["content_source"] == "youtube_transcript_api_manual"
     assert shown["raw_payload"]["transcript_segments"][0]["timestamp"] == "0:00"
-    assert any(source.costs_money for source in repo.list_sources() if source.kind == "x")
+    assert any(source.paid for source in repo.list_sources() if source.kind == "x")
 
     source_id = next(
         source.id for source in repo.list_sources() if source.name == "Example Channel"
@@ -284,7 +288,7 @@ def test_scan_continues_after_source_failure_and_reports_item_statuses(
         id="good-source",
         kind="x",
         name="Healthy Feed",
-        costs_money=True,
+        paid=True,
         handle="healthy",
         feed_url="https://x.com/healthy",
     )
@@ -370,13 +374,27 @@ def test_scan_continues_after_source_failure_and_reports_item_statuses(
     assert "Scanning bad-source (Broken Feed)" in output
     assert "bad-source: unreachable - HTTP Error 404: Not Found" in output
     assert "Scanning good-source (Healthy Feed)" in output
-    assert "good-source: this source uses a paid or metered integration" in output
+    assert "good-source: this source is marked paid" in output
     assert "good-source: reachable" in output
     assert "good-source: existing Already seen" in output
     assert "good-source: new Brand new" in output
     assert "scan complete: 2 items seen, 1 new, 1 failed, 0 skipped" in output
     items = repo.list_items(limit=10)
     assert any(item.title == "Brand new" for item in items)
+    runs = repo.list_scan_runs(limit=10)
+    assert len(runs) == 1
+    assert runs[0].status == "partial_failure"
+    assert runs[0].sources_considered == 2
+    assert runs[0].sources_scanned == 2
+    assert runs[0].sources_failed == 1
+    assert runs[0].items_seen == 2
+    assert runs[0].items_new == 1
+    assert runs[0].items_existing == 1
+    detail = repo.get_scan_run(runs[0].scan_run_id)
+    assert detail is not None
+    assert [source.status for source in detail.sources] == ["failed", "success"]
+    assert detail.sources[0].error == "HTTP Error 404: Not Found"
+    assert [item.result for item in detail.items] == ["existing", "new"]
 
 
 def test_scan_skips_paid_sources_without_include_paid(tmp_path: Path) -> None:
@@ -388,7 +406,7 @@ def test_scan_skips_paid_sources_without_include_paid(tmp_path: Path) -> None:
             id="paid-source",
             kind="x",
             name="Paid X",
-            costs_money=True,
+            paid=True,
             handle="example",
             feed_url="https://x.com/example",
         )
@@ -423,6 +441,93 @@ def test_scan_skips_paid_sources_without_include_paid(tmp_path: Path) -> None:
     assert "Skipping paid-source (Paid X): paid source; rerun with --include-paid" in output
     assert "Scanning paid-source" not in output
     assert "scan complete: 0 items seen, 0 new, 0 failed, 1 skipped" in output
+    runs = repo.list_scan_runs(limit=10)
+    assert len(runs) == 1
+    assert runs[0].status == "success"
+    assert runs[0].sources_considered == 1
+    assert runs[0].sources_scanned == 0
+    assert runs[0].sources_skipped == 1
+    detail = repo.get_scan_run(runs[0].scan_run_id)
+    assert detail is not None
+    assert len(detail.sources) == 1
+    assert detail.sources[0].status == "skipped"
+    assert detail.sources[0].skip_reason == "paid_not_included"
+
+def test_scans_list_and_show_report_history(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    source = SourceConfig(id="feed-1", kind="feed", name="Example Feed")
+    repo.upsert_source(source)
+    run_id = repo.start_scan_run(
+        include_paid=False,
+        selected_source_kinds=["feed"],
+        selected_source_ids=["feed-1"],
+        started_at=datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
+    )
+    scan_source_id = repo.record_scan_source(
+        run_id,
+        source=source,
+        status="success",
+        started_at=datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 4, 18, 12, 1, tzinfo=timezone.utc),
+        cutoff_at=datetime(2026, 4, 17, 12, 0, tzinfo=timezone.utc),
+        items_seen=1,
+        items_new=1,
+        items_existing=0,
+    )
+    repo.record_scan_item(
+        scan_source_id,
+        NormalizedItem(
+            item_id="11111111-1111-4111-8111-111111111111",
+            source_id="feed-1",
+            item_type="feed",
+            external_id="post-1",
+            canonical_url="https://example.com/post-1",
+            title="Fresh Post",
+            author="Author",
+            published_at=datetime(2026, 4, 18, 11, 30, tzinfo=timezone.utc),
+            excerpt="Fresh",
+            content_text="Fresh",
+        ),
+        result="new",
+    )
+    repo.finish_scan_run(
+        run_id,
+        status="success",
+        sources_considered=1,
+        sources_scanned=1,
+        sources_skipped=0,
+        sources_failed=0,
+        items_seen=1,
+        items_new=1,
+        items_existing=0,
+        finished_at=datetime(2026, 4, 18, 12, 2, tzinfo=timezone.utc),
+    )
+
+    with redirect_stdout(io.StringIO()) as buffer:
+        args = parser.parse_args(["--db", str(db_path), "scans", "list"])
+        assert run(args) == 0
+    output = buffer.getvalue()
+    assert "Scans" in output
+    assert "Run" in output
+    assert "success" in output
+    assert "feed" in output
+    assert "1/1" in output
+    assert "1 seen" in output
+    assert "1 new" in output
+    assert "0 existing" in output
+
+    with redirect_stdout(io.StringIO()) as buffer:
+        args = parser.parse_args(["--db", str(db_path), "scans", "show", str(run_id)])
+        assert run(args) == 0
+    payload = json.loads(buffer.getvalue())
+    assert payload["run"]["scan_run_id"] == run_id
+    assert payload["run"]["status"] == "success"
+    assert payload["sources"][0]["source_id"] == "feed-1"
+    assert payload["sources"][0]["cutoff_at"] == "2026-04-17T12:00:00+00:00"
+    assert payload["items"][0]["title"] == "Fresh Post"
+    assert payload["items"][0]["result"] == "new"
 
 
 def test_scan_uses_last_successful_scan_time_for_incremental_blog_and_youtube(
@@ -558,6 +663,203 @@ def test_scan_uses_last_successful_scan_time_for_incremental_blog_and_youtube(
         assert fetch_calls == ["new123"]
     finally:
         adapters.fetch_transcript = original_fetch
+
+
+def test_scan_uses_youtube_api_uploads_playlist_metadata(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_source(
+        SourceConfig(
+            id="youtube-source",
+            kind="youtube",
+            name="Example Channel",
+            feed_url="https://www.youtube.com/watch?v=abc123",
+            transcript_languages=["en"],
+            metadata={
+                "channel_id": "UC123",
+                "uploads_playlist_id": "UU123",
+            },
+        )
+    )
+    repo.mark_source_scan_succeeded(
+        "youtube-source",
+        datetime(2026, 4, 14, 12, 30, tzinfo=timezone.utc),
+    )
+
+    original_iter_uploads = adapters.youtube_api.iter_uploads
+    original_fetch = adapters.fetch_transcript
+    fetch_calls: list[str] = []
+
+    def fake_iter_uploads(uploads_playlist_id: str, **kwargs: object):
+        assert uploads_playlist_id == "UU123"
+        assert kwargs["limit"] == 5
+        assert kwargs["page_size"] == 1
+        return iter(
+            [
+                adapters.youtube_api.YouTubeUpload(
+                    video_id="new123",
+                    title="New API Video",
+                    description="Fresh upload",
+                    channel_title="Example Channel",
+                    published_at=datetime(2026, 4, 14, 13, 0, tzinfo=timezone.utc),
+                    canonical_url="https://www.youtube.com/watch?v=new123",
+                ),
+                adapters.youtube_api.YouTubeUpload(
+                    video_id="old123",
+                    title="Old API Video",
+                    description="Older upload",
+                    channel_title="Example Channel",
+                    published_at=datetime(2026, 4, 14, 12, 0, tzinfo=timezone.utc),
+                    canonical_url="https://www.youtube.com/watch?v=old123",
+                ),
+            ]
+        )
+
+    def fake_fetch_transcript(
+        video_id_or_url: str,
+        languages: list[str] | None = None,
+    ) -> TranscriptResult:
+        fetch_calls.append(video_id_or_url)
+        assert languages == ["en"]
+        return TranscriptResult(
+            text=f"transcript for {video_id_or_url}",
+            language_code="en",
+            language_name="English",
+            source="youtube_transcript_api_manual",
+            is_generated=False,
+            segments=[
+                TranscriptSegment(
+                    text=f"transcript for {video_id_or_url}",
+                    start=0.0,
+                    duration=1.0,
+                    timestamp="0:00",
+                )
+            ],
+        )
+
+    adapters.youtube_api.iter_uploads = fake_iter_uploads
+    adapters.fetch_transcript = fake_fetch_transcript
+    try:
+        scan_buffer = io.StringIO()
+        with redirect_stdout(scan_buffer):
+            args = parser.parse_args(["--db", str(db_path), "scan", "--source", "youtube"])
+            assert run(args) == 0
+    finally:
+        adapters.youtube_api.iter_uploads = original_iter_uploads
+        adapters.fetch_transcript = original_fetch
+
+    output = scan_buffer.getvalue()
+    assert "Scanning youtube-source (Example Channel)" in output
+    assert "youtube-source: discovered New API Video (new123)" in output
+    assert "youtube-source: transcript found for new123" in output
+    assert "youtube-source: new New API Video" in output
+    assert "youtube-source: new Old API Video" not in output
+    assert fetch_calls == ["new123"]
+
+
+def test_source_add_rejects_invalid_num_items(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+
+    add_args = parser.parse_args(
+        [
+            "--db",
+            str(db_path),
+            "source",
+            "add",
+            "--name",
+            "Example Channel",
+            "--num-items",
+            "0",
+            "https://www.youtube.com/watch?v=abc123",
+        ]
+    )
+
+    with pytest.raises(ConfigError, match="--num-items must be at least 1"):
+        run(add_args)
+
+
+
+def test_scan_stops_after_youtube_transcript_failure(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_source(
+        SourceConfig(
+            id="youtube-source",
+            kind="youtube",
+            name="Example Channel",
+            feed_url="https://www.youtube.com/watch?v=abc123",
+            transcript_languages=["en"],
+            metadata={
+                "channel_id": "UC123",
+                "uploads_playlist_id": "UU123",
+            },
+        )
+    )
+
+    original_iter_uploads = adapters.youtube_api.iter_uploads
+    original_fetch = adapters.fetch_transcript
+    fetch_calls: list[str] = []
+
+    def fake_iter_uploads(uploads_playlist_id: str, **kwargs: object):
+        assert uploads_playlist_id == "UU123"
+        assert kwargs["limit"] == 5
+        assert kwargs["page_size"] == 1
+        return iter(
+            [
+                adapters.youtube_api.YouTubeUpload(
+                    video_id="new123",
+                    title="New API Video",
+                    description="Fresh upload",
+                    channel_title="Example Channel",
+                    published_at=datetime(2026, 4, 14, 13, 0, tzinfo=timezone.utc),
+                    canonical_url="https://www.youtube.com/watch?v=new123",
+                ),
+                adapters.youtube_api.YouTubeUpload(
+                    video_id="next123",
+                    title="Second API Video",
+                    description="Should not be fetched after transcript failure",
+                    channel_title="Example Channel",
+                    published_at=datetime(2026, 4, 14, 12, 0, tzinfo=timezone.utc),
+                    canonical_url="https://www.youtube.com/watch?v=next123",
+                ),
+            ]
+        )
+
+    def fake_fetch_transcript(
+        video_id_or_url: str,
+        languages: list[str] | None = None,
+    ) -> TranscriptResult:
+        fetch_calls.append(video_id_or_url)
+        raise TranscriptUnavailable(
+            "YouTube is receiving too many requests from your IP address",
+            content_status=ContentStatus.RATE_LIMITED,
+        )
+
+    adapters.youtube_api.iter_uploads = fake_iter_uploads
+    adapters.fetch_transcript = fake_fetch_transcript
+    try:
+        scan_buffer = io.StringIO()
+        with redirect_stdout(scan_buffer):
+            args = parser.parse_args(["--db", str(db_path), "scan", "--source", "youtube"])
+            assert run(args) == 0
+    finally:
+        adapters.youtube_api.iter_uploads = original_iter_uploads
+        adapters.fetch_transcript = original_fetch
+
+    output = scan_buffer.getvalue()
+    assert "youtube-source: discovered New API Video (new123)" in output
+    assert "youtube-source: transcript rate-limited for new123" in output
+    assert "youtube-source: new New API Video" in output
+    assert "youtube-source: transcript rate-limited for New API Video" in output
+    assert "youtube-source: new Second API Video" not in output
+    stored_items = Repository(db_path).list_items(limit=10)
+    assert len(stored_items) == 1
+    assert stored_items[0].content_status == ContentStatus.RATE_LIMITED
+    assert fetch_calls == ["new123"]
+
 
 
 def test_scan_filters_x_items_using_last_successful_scan_time(tmp_path: Path) -> None:
@@ -851,7 +1153,7 @@ def test_scan_can_filter_by_source_kind(tmp_path: Path) -> None:
         id="x-source",
         kind="x",
         name="Example X",
-        costs_money=True,
+        paid=True,
         handle="example",
         feed_url="https://x.com/example",
     )
@@ -1109,7 +1411,7 @@ def test_x_sources_default_to_paid(tmp_path: Path) -> None:
 
     assert len(sources) == 1
     assert sources[0].kind == "x"
-    assert sources[0].costs_money is True
+    assert sources[0].paid is True
 
 
 def test_x_profile_urls_infer_handle(tmp_path: Path) -> None:
@@ -1134,30 +1436,83 @@ def test_x_profile_urls_infer_handle(tmp_path: Path) -> None:
     assert sources[0].handle == "example"
 
 
-def test_youtube_urls_infer_youtube_kind(tmp_path: Path) -> None:
+def test_youtube_urls_infer_youtube_kind_and_store_api_metadata(tmp_path: Path) -> None:
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
+    original_resolve = cli.youtube_api.resolve_channel_from_url
 
-    add_args = parser.parse_args(
-        [
-            "--db",
-            str(db_path),
-            "source",
-            "add",
-            "--name",
-            "Example Channel",
-            "https://www.youtube.com/feeds/videos.xml?channel_id=abc123",
-        ]
-    )
-    assert run(add_args) == 0
+    def fake_resolve_channel_from_url(url: str):
+        assert url == "https://www.youtube.com/watch?v=abc123"
+        return cli.youtube_api.YouTubeChannel(
+            channel_id="UC123",
+            title="Example Channel",
+            uploads_playlist_id="UU123",
+        )
+
+    cli.youtube_api.resolve_channel_from_url = fake_resolve_channel_from_url
+    try:
+        add_args = parser.parse_args(
+            [
+                "--db",
+                str(db_path),
+                "source",
+                "add",
+                "--name",
+                "Example Channel",
+                "https://www.youtube.com/watch?v=abc123",
+            ]
+        )
+        assert run(add_args) == 0
+    finally:
+        cli.youtube_api.resolve_channel_from_url = original_resolve
 
     sources = Repository(db_path).list_sources()
     assert len(sources) == 1
     assert sources[0].kind == "youtube"
     assert sources[0].transcript_languages == ["en"]
+    assert sources[0].metadata["channel_id"] == "UC123"
+    assert sources[0].metadata["uploads_playlist_id"] == "UU123"
+    assert sources[0].metadata["num_items"] == 5
 
 
-def test_regular_youtube_urls_do_not_infer_youtube_kind(tmp_path: Path) -> None:
+def test_youtube_sources_allow_custom_num_items(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    original_resolve = cli.youtube_api.resolve_channel_from_url
+
+    def fake_resolve_channel_from_url(url: str):
+        assert url == "https://www.youtube.com/watch?v=abc123"
+        return cli.youtube_api.YouTubeChannel(
+            channel_id="UC123",
+            title="Example Channel",
+            uploads_playlist_id="UU123",
+        )
+
+    cli.youtube_api.resolve_channel_from_url = fake_resolve_channel_from_url
+    try:
+        add_args = parser.parse_args(
+            [
+                "--db",
+                str(db_path),
+                "source",
+                "add",
+                "--name",
+                "Example Channel",
+                "--num-items",
+                "12",
+                "https://www.youtube.com/watch?v=abc123",
+            ]
+        )
+        assert run(add_args) == 0
+    finally:
+        cli.youtube_api.resolve_channel_from_url = original_resolve
+
+    sources = Repository(db_path).list_sources()
+    assert len(sources) == 1
+    assert sources[0].metadata["num_items"] == 12
+
+
+def test_non_youtube_urls_default_to_feed_kind(tmp_path: Path) -> None:
     parser = build_parser()
     db_path = tmp_path / "laminar.db"
 
@@ -1168,8 +1523,8 @@ def test_regular_youtube_urls_do_not_infer_youtube_kind(tmp_path: Path) -> None:
             "source",
             "add",
             "--name",
-            "Example Video",
-            "https://www.youtube.com/watch?v=abc123",
+            "Example Feed",
+            "https://example.com/feed.xml",
         ]
     )
     assert run(add_args) == 0
@@ -1194,7 +1549,7 @@ def test_youtube_sources_default_transcript_language_to_english(tmp_path: Path) 
             "youtube",
             "--name",
             "Example Channel",
-            "https://www.youtube.com/feeds/videos.xml?channel_id=abc123",
+            "https://example.com/youtube.xml",
         ]
     )
     assert run(add_args) == 0
@@ -1202,6 +1557,7 @@ def test_youtube_sources_default_transcript_language_to_english(tmp_path: Path) 
     sources = Repository(db_path).list_sources()
     assert len(sources) == 1
     assert sources[0].transcript_languages == ["en"]
+    assert sources[0].metadata["num_items"] == 5
 
 
 def test_explicit_type_overrides_url_inference(tmp_path: Path) -> None:
@@ -1226,7 +1582,7 @@ def test_explicit_type_overrides_url_inference(tmp_path: Path) -> None:
     sources = Repository(db_path).list_sources()
     assert len(sources) == 1
     assert sources[0].kind == "feed"
-    assert sources[0].costs_money is False
+    assert sources[0].paid is False
     assert sources[0].handle is None
 
 
@@ -1326,7 +1682,6 @@ def test_source_add_help_uses_url_type_and_paid_flags(capsys) -> None:
     assert "--kind" not in help_text
     assert "--feed-url" not in help_text
     assert "--command" not in help_text
-    assert "--costs-money" not in help_text
     assert "--handle" not in help_text
 
 
@@ -1640,3 +1995,212 @@ def test_items_show_rejects_ambiguous_title(tmp_path: Path, capsys) -> None:
     assert "Multiple items share the title" in captured.err
     assert "Daily Briefing (Channel A)" in captured.err
     assert "Daily Briefing (Channel B)" in captured.err
+
+
+def test_source_export_and_import_round_trip_yaml(tmp_path: Path) -> None:
+    parser = build_parser()
+    source_db_path = tmp_path / "source.db"
+    import_db_path = tmp_path / "import.db"
+    export_path = tmp_path / "sources.yaml"
+    repo = Repository(source_db_path)
+    scanned_at = datetime(2026, 4, 18, 12, 30, tzinfo=timezone.utc)
+    repo.upsert_source(
+        SourceConfig(
+            id="yt-1",
+            kind="youtube",
+            name="Example Channel",
+            enabled=False,
+            paid=True,
+            feed_url="https://www.youtube.com/watch?v=abc123",
+            handle="@example",
+            transcript_languages=["en", "es"],
+            metadata={"channel_id": "UC123", "num_items": 7},
+        )
+    )
+    repo.mark_source_scan_succeeded("yt-1", scanned_at)
+
+    export_args = parser.parse_args(["--db", str(source_db_path), "source", "export", str(export_path)])
+    assert run(export_args) == 0
+
+    exported = yaml.safe_load(export_path.read_text())
+    assert exported["version"] == 1
+    assert exported["sources"][0]["id"] == "yt-1"
+    assert exported["sources"][0]["last_successful_scan_at"] == scanned_at.isoformat()
+
+    import_args = parser.parse_args(["--db", str(import_db_path), "source", "import", str(export_path)])
+    assert run(import_args) == 0
+
+    imported = Repository(import_db_path).get_source("yt-1")
+    assert imported is not None
+    assert imported.name == "Example Channel"
+    assert imported.enabled is False
+    assert imported.paid is True
+    assert imported.transcript_languages == ["en", "es"]
+    assert imported.metadata == {"channel_id": "UC123", "num_items": 7}
+    assert imported.last_successful_scan_at == scanned_at
+
+
+def test_source_export_without_path_writes_yaml_to_stdout(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_source(
+        SourceConfig(
+            id="feed-1",
+            kind="feed",
+            name="Example Feed",
+            feed_url="https://example.com/feed.xml",
+        )
+    )
+
+    with redirect_stdout(io.StringIO()) as buffer:
+        export_args = parser.parse_args(["--db", str(db_path), "source", "export"])
+        assert run(export_args) == 0
+
+    exported = yaml.safe_load(buffer.getvalue())
+    assert exported["version"] == 1
+    assert exported["sources"][0]["id"] == "feed-1"
+
+
+def test_items_export_and_import_round_trip_yaml(tmp_path: Path) -> None:
+    parser = build_parser()
+    source_db_path = tmp_path / "source.db"
+    import_db_path = tmp_path / "import.db"
+    export_path = tmp_path / "items.yaml"
+    repo = Repository(source_db_path)
+    retrieved_at = datetime(2026, 4, 18, 14, 45, tzinfo=timezone.utc)
+    published_at = datetime(2026, 4, 18, 13, 0, tzinfo=timezone.utc)
+    repo.upsert_item(
+        NormalizedItem(
+            item_id="11111111-1111-4111-8111-111111111111",
+            source_id="yt-1",
+            item_type="video",
+            external_id="abc123",
+            canonical_url="https://youtube.com/watch?v=abc123",
+            title="Daily Briefing",
+            author="Channel",
+            published_at=published_at,
+            excerpt="Summary",
+            content_text="Transcript text",
+            content_status=ContentStatus.RATE_LIMITED,
+            content_language="en",
+            content_source="youtube_transcript_api",
+            raw_payload={"video_id": "abc123"},
+            retrieved_at=retrieved_at,
+        )
+    )
+
+    export_args = parser.parse_args(["--db", str(source_db_path), "items", "export", str(export_path)])
+    assert run(export_args) == 0
+
+    exported = yaml.safe_load(export_path.read_text())
+    assert exported["version"] == 1
+    assert exported["items"][0]["item_id"] == "11111111-1111-4111-8111-111111111111"
+    assert exported["items"][0]["retrieved_at"] == retrieved_at.isoformat()
+
+    import_args = parser.parse_args(["--db", str(import_db_path), "items", "import", str(export_path)])
+    assert run(import_args) == 0
+
+    items = Repository(import_db_path).list_items(limit=10)
+    assert len(items) == 1
+    imported = items[0]
+    assert imported.item_id == "11111111-1111-4111-8111-111111111111"
+    assert imported.source_id == "yt-1"
+    assert imported.item_type == "video"
+    assert imported.external_id == "abc123"
+    assert imported.canonical_url == "https://youtube.com/watch?v=abc123"
+    assert imported.title == "Daily Briefing"
+    assert imported.author == "Channel"
+    assert imported.published_at == published_at
+    assert imported.retrieved_at == retrieved_at
+    assert imported.excerpt == "Summary"
+    assert imported.content_text == "Transcript text"
+    assert imported.content_status == ContentStatus.RATE_LIMITED
+    assert imported.content_language == "en"
+    assert imported.content_source == "youtube_transcript_api"
+    assert imported.raw_payload == {"video_id": "abc123"}
+
+
+def test_items_export_without_path_writes_yaml_to_stdout(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_item(
+        NormalizedItem(
+            item_id="11111111-1111-4111-8111-111111111111",
+            source_id="yt-1",
+            item_type="video",
+            external_id="abc123",
+            canonical_url="https://youtube.com/watch?v=abc123",
+            title="Daily Briefing",
+            author="Channel",
+            published_at=datetime(2026, 4, 18, 13, 0, tzinfo=timezone.utc),
+            excerpt="Summary",
+            content_text="Transcript text",
+        )
+    )
+
+    with redirect_stdout(io.StringIO()) as buffer:
+        export_args = parser.parse_args(["--db", str(db_path), "items", "export"])
+        assert run(export_args) == 0
+
+    exported = yaml.safe_load(buffer.getvalue())
+    assert exported["version"] == 1
+    assert exported["items"][0]["item_id"] == "11111111-1111-4111-8111-111111111111"
+
+
+def test_items_import_updates_existing_entries(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    import_path = tmp_path / "items.yaml"
+    repo = Repository(db_path)
+    repo.upsert_item(
+        NormalizedItem(
+            item_id="11111111-1111-4111-8111-111111111111",
+            source_id="yt-1",
+            item_type="video",
+            external_id="abc123",
+            canonical_url="https://youtube.com/watch?v=abc123",
+            title="Initial Title",
+            author="Channel",
+            published_at=datetime(2026, 4, 18, 13, 0, tzinfo=timezone.utc),
+            excerpt="Summary",
+            content_text="Transcript text",
+        )
+    )
+    import_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "items": [
+                    {
+                        "item_id": "99999999-9999-4999-8999-999999999999",
+                        "source_id": "yt-1",
+                        "item_type": "video",
+                        "external_id": "abc123",
+                        "canonical_url": "https://youtube.com/watch?v=abc123",
+                        "title": "Updated Title",
+                        "author": "Channel",
+                        "published_at": "2026-04-18T13:00:00+00:00",
+                        "retrieved_at": "2026-04-18T14:00:00+00:00",
+                        "excerpt": "Updated summary",
+                        "content_text": "Updated transcript",
+                        "content_status": "available",
+                        "content_language": "en",
+                        "content_source": "youtube_transcript_api",
+                        "raw_payload": {"video_id": "abc123"},
+                    }
+                ],
+            },
+            sort_keys=False,
+        )
+    )
+
+    import_args = parser.parse_args(["--db", str(db_path), "items", "import", str(import_path)])
+    assert run(import_args) == 0
+
+    items = repo.list_items(limit=10)
+    assert len(items) == 1
+    assert items[0].title == "Updated Title"
+    assert items[0].excerpt == "Updated summary"
+    assert items[0].content_text == "Updated transcript"

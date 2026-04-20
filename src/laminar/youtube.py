@@ -4,10 +4,15 @@ from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api import _errors as transcript_errors
+
+from laminar.models import ContentStatus
 
 
 class TranscriptUnavailable(Exception):
-    pass
+    def __init__(self, message: str, *, content_status: ContentStatus) -> None:
+        super().__init__(message)
+        self.content_status = content_status
 
 
 @dataclass(slots=True)
@@ -52,7 +57,10 @@ def fetch_transcript(
         transcript = api.list(video_id).find_transcript(language_preferences)
         fetched = transcript.fetch()
     except Exception as exc:  # pragma: no cover - third-party exceptions vary
-        raise TranscriptUnavailable(str(exc)) from exc
+        raise TranscriptUnavailable(
+            str(exc),
+            content_status=_status_from_transcript_error(exc),
+        ) from exc
 
     segments = [
         TranscriptSegment(
@@ -65,7 +73,10 @@ def fetch_transcript(
         if snippet.text.strip()
     ]
     if not segments:
-        raise TranscriptUnavailable("Transcript was empty")
+        raise TranscriptUnavailable(
+            "Transcript was empty",
+            content_status=ContentStatus.MISSING,
+        )
 
     return TranscriptResult(
         text="\n".join(segment.text for segment in segments),
@@ -77,6 +88,33 @@ def fetch_transcript(
         is_generated=transcript.is_generated,
         segments=segments,
     )
+
+
+def _status_from_transcript_error(exc: Exception) -> ContentStatus:
+    if isinstance(
+        exc,
+        (
+            transcript_errors.IpBlocked,
+            transcript_errors.RequestBlocked,
+            transcript_errors.YouTubeRequestFailed,
+            transcript_errors.PoTokenRequired,
+        ),
+    ):
+        return ContentStatus.RATE_LIMITED
+
+    if isinstance(
+        exc,
+        (
+            transcript_errors.NoTranscriptFound,
+            transcript_errors.TranscriptsDisabled,
+            transcript_errors.NotTranslatable,
+            transcript_errors.TranslationLanguageNotAvailable,
+        ),
+    ):
+        return ContentStatus.MISSING
+
+    return ContentStatus.FETCH_FAILED
+
 
 
 def format_timestamp(seconds: float) -> str:
