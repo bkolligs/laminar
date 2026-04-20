@@ -2040,6 +2040,28 @@ def test_source_export_and_import_round_trip_yaml(tmp_path: Path) -> None:
     assert imported.last_successful_scan_at == scanned_at
 
 
+def test_source_export_without_path_writes_yaml_to_stdout(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_source(
+        SourceConfig(
+            id="feed-1",
+            kind="feed",
+            name="Example Feed",
+            feed_url="https://example.com/feed.xml",
+        )
+    )
+
+    with redirect_stdout(io.StringIO()) as buffer:
+        export_args = parser.parse_args(["--db", str(db_path), "source", "export"])
+        assert run(export_args) == 0
+
+    exported = yaml.safe_load(buffer.getvalue())
+    assert exported["version"] == 1
+    assert exported["sources"][0]["id"] == "feed-1"
+
+
 def test_items_export_and_import_round_trip_yaml(tmp_path: Path) -> None:
     parser = build_parser()
     source_db_path = tmp_path / "source.db"
@@ -2097,6 +2119,34 @@ def test_items_export_and_import_round_trip_yaml(tmp_path: Path) -> None:
     assert imported.content_language == "en"
     assert imported.content_source == "youtube_transcript_api"
     assert imported.raw_payload == {"video_id": "abc123"}
+
+
+def test_items_export_without_path_writes_yaml_to_stdout(tmp_path: Path) -> None:
+    parser = build_parser()
+    db_path = tmp_path / "laminar.db"
+    repo = Repository(db_path)
+    repo.upsert_item(
+        NormalizedItem(
+            item_id="11111111-1111-4111-8111-111111111111",
+            source_id="yt-1",
+            item_type="video",
+            external_id="abc123",
+            canonical_url="https://youtube.com/watch?v=abc123",
+            title="Daily Briefing",
+            author="Channel",
+            published_at=datetime(2026, 4, 18, 13, 0, tzinfo=timezone.utc),
+            excerpt="Summary",
+            content_text="Transcript text",
+        )
+    )
+
+    with redirect_stdout(io.StringIO()) as buffer:
+        export_args = parser.parse_args(["--db", str(db_path), "items", "export"])
+        assert run(export_args) == 0
+
+    exported = yaml.safe_load(buffer.getvalue())
+    assert exported["version"] == 1
+    assert exported["items"][0]["item_id"] == "11111111-1111-4111-8111-111111111111"
 
 
 def test_items_import_updates_existing_entries(tmp_path: Path) -> None:

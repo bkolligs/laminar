@@ -65,11 +65,11 @@ For X sources, Laminar resolves the source URL through `xurl` automatically. X l
 
 `laminar source show` prints the stored details for a single source as JSON, including its config fields, last successful scan timestamp, item count, and logical item size.
 
-`laminar source export PATH` writes all stored sources to a YAML file, preserving source IDs, metadata, transcript language preferences, and the last successful scan timestamp. `laminar source import PATH` reads that YAML back in and upserts sources by source ID.
+`laminar source export [PATH]` writes all stored sources to YAML, preserving source IDs, metadata, transcript language preferences, and the last successful scan timestamp. If `PATH` is omitted, Laminar writes the YAML to stdout so you can pipe it. `laminar source import PATH` reads that YAML back in and upserts sources by source ID.
 
 `laminar items remove` deletes a single stored item and its associated stored content. Like `items show`, it accepts an exact item ID, a unique item ID prefix, or a unique title.
 
-`laminar items export PATH` writes stored items to YAML. You can filter with `--source` and `--type`. `laminar items import PATH` reads that YAML back in and upserts items using the existing canonical URL and `(source_id, external_id)` dedupe rules, while preserving exported item IDs for new rows. Importing items does not create source definitions; if an item references a source ID that is not present in the `sources` table, Laminar keeps the item and reports that source as `[missing source]` in stats until you import or add the source separately.
+`laminar items export [PATH]` writes stored items to YAML. If `PATH` is omitted, Laminar writes the YAML to stdout so you can pipe it. You can filter with `--source` and `--type`. `laminar items import PATH` reads that YAML back in and upserts items using the existing canonical URL and `(source_id, external_id)` dedupe rules, while preserving exported item IDs for new rows. Importing items does not create source definitions; if an item references a source ID that is not present in the `sources` table, Laminar keeps the item and reports that source as `[missing source]` in stats until you import or add the source separately.
 
 Pass `-v` or `--verbose` to `laminar scan` when you want detailed progress logging, including the active incremental cutoff and when older entries are skipped because they are at or before that watermark. Use `-i` or `--include-paid` to include paid sources.
 

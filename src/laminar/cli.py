@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     show_source = source_subparsers.add_parser("show")
     show_source.add_argument("source_id")
     export_sources = source_subparsers.add_parser("export")
-    export_sources.add_argument("path")
+    export_sources.add_argument("path", nargs="?", default="-")
     import_sources = source_subparsers.add_parser("import")
     import_sources.add_argument("path")
 
@@ -185,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     items_remove = items_subparsers.add_parser("remove")
     items_remove.add_argument("item_id")
     items_export = items_subparsers.add_parser("export")
-    items_export.add_argument("path")
+    items_export.add_argument("path", nargs="?", default="-")
     items_export.add_argument("--source")
     items_export.add_argument("--type")
     items_import = items_subparsers.add_parser("import")
@@ -288,9 +288,10 @@ def _run_source(args: argparse.Namespace) -> int:
             "sources": [_source_to_export_dict(source) for source in repo.list_sources()],
         }
         _write_yaml_file(args.path, payload)
-        _console().print(
-            f"Exported {len(payload['sources'])} sources to {_display_path(args.path)}"
-        )
+        if args.path != "-":
+            _console().print(
+                f"Exported {len(payload['sources'])} sources to {_display_path(args.path)}"
+            )
         return 0
     if args.source_command == "import":
         payload = _load_yaml_file(args.path, label="Source import")
@@ -647,9 +648,10 @@ def _run_items(args: argparse.Namespace) -> int:
             "items": [_item_to_export_dict(item) for item in items],
         }
         _write_yaml_file(args.path, payload)
-        _console().print(
-            f"Exported {len(items)} items to {_display_path(args.path)}"
-        )
+        if args.path != "-":
+            _console().print(
+                f"Exported {len(items)} items to {_display_path(args.path)}"
+            )
         return 0
     if args.items_command == "import":
         payload = _load_yaml_file(args.path, label="Item import")

@@ -34,7 +34,7 @@ Use these commands for inspection and cleanup:
 
 - `uv run laminar source list`
 - `uv run laminar source show SOURCE_ID`
-- `uv run laminar source export PATH`
+- `uv run laminar source export [PATH]`
 - `uv run laminar source import PATH`
 - `uv run laminar source remove SOURCE_ID`
 - `uv run laminar source remove --recursive SOURCE_ID`
@@ -43,7 +43,7 @@ Prefer the CLI over manual database edits when changing source state.
 
 Source import/export expectations:
 
-- `laminar source export` writes all stored sources to YAML, including source IDs, metadata, transcript languages, and `last_successful_scan_at`.
+- `laminar source export` writes all stored sources to YAML, including source IDs, metadata, transcript languages, and `last_successful_scan_at`. When `PATH` is omitted, it writes YAML to stdout.
 - `laminar source import` upserts sources by source ID.
 
 ## Scan And Retrieval Workflows
@@ -61,9 +61,9 @@ Use these commands to inspect what Laminar stored:
 - `uv run laminar items list --limit 20`
 - `uv run laminar items list --source SOURCE_ID`
 - `uv run laminar items show ITEM_ID`
-- `uv run laminar items export PATH`
-- `uv run laminar items export PATH --source SOURCE_ID`
-- `uv run laminar items export PATH --type video`
+- `uv run laminar items export [PATH]`
+- `uv run laminar items export [PATH] --source SOURCE_ID`
+- `uv run laminar items export [PATH] --type video`
 - `uv run laminar items import PATH`
 - `uv run laminar items remove ITEM_ID`
 - `uv run laminar search "query terms"`
@@ -73,7 +73,7 @@ Search is text-based over title, excerpt, and stored content text. YouTube items
 
 Item import/export expectations:
 
-- `laminar items export` writes stored items to YAML and supports `--source` and `--type` filters.
+- `laminar items export` writes stored items to YAML and supports `--source` and `--type` filters. When `PATH` is omitted, it writes YAML to stdout.
 - `laminar items import` upserts items using canonical URL first, then `(source_id, external_id)`.
 - Importing items does not create source definitions. If imported items reference missing source IDs, Laminar keeps the items and reports those sources as `[missing source]` in stats until the sources are added or imported separately.
 
