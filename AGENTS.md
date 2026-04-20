@@ -5,7 +5,7 @@
 Laminar is a local-first Python CLI for ingesting updates from multiple content sources and storing them in SQLite for deterministic retrieval by downstream agents.
 
 Current source types:
-- blog
+- feed
 - youtube
 - x
 
@@ -27,9 +27,13 @@ Common commands:
 uv sync
 uv run pytest
 uv run laminar source validate
+uv run laminar source export sources.yaml
+uv run laminar source import sources.yaml
 uv run laminar scan
 uv run laminar scan --include-paid
 uv run laminar items list
+uv run laminar items export items.yaml
+uv run laminar items import items.yaml
 ```
 
 ## Code Layout
@@ -56,6 +60,8 @@ uv run laminar items list
 ## Current Behavior Expectations
 
 - Blog ingestion is RSS/Atom-style feed ingestion.
+- `laminar source export/import` round-trip source definitions through YAML.
+- `laminar items export/import` round-trip stored items through YAML.
 - YouTube items should include transcript text when captions are available.
 - X ingestion currently assumes `xurl` or another configured command returns JSON in the expected shape.
 - X sources are treated as paid/metered by default, including legacy rows loaded from SQLite.

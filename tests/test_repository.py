@@ -230,7 +230,19 @@ def test_remove_source_requires_recursive_when_items_exist(tmp_path: Path) -> No
 def test_remove_source_recursive_deletes_source_items_and_scans(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
     repo.upsert_source(SourceConfig(id="feed-1", kind="feed", name="Example Feed"))
-    repo.start_scan("feed-1")
+    scan_run_id = repo.start_scan_run(
+        include_paid=False,
+        selected_source_kinds=[],
+        selected_source_ids=[],
+    )
+    repo.record_scan_source(
+        scan_run_id,
+        source=SourceConfig(id="feed-1", kind="feed", name="Example Feed"),
+        status="success",
+        items_seen=0,
+        items_new=0,
+        items_existing=0,
+    )
     repo.upsert_item(
         NormalizedItem(
             source_id="feed-1",
@@ -274,6 +286,159 @@ def test_remove_source_recursive_deletes_source_items_and_scans(tmp_path: Path) 
             "SELECT COUNT(*) FROM scans WHERE source_id = ?",
             ("feed-1",),
         ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM scan_sources WHERE source_id = ?",
+            ("feed-1",),
+        ).fetchone()[0] == 0
+
+
+def test_scan_history_records_run_source_and_item_details(tmp_path: Path) -> None:
+    repo = Repository(tmp_path / "laminar.db")
+    source = SourceConfig(id="feed-1", kind="feed", name="Example Feed")
+    repo.upsert_source(source)
+    run_started_at = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
+    source_started_at = datetime(2026, 4, 18, 12, 1, tzinfo=timezone.utc)
+    source_finished_at = datetime(2026, 4, 18, 12, 2, tzinfo=timezone.utc)
+    run_finished_at = datetime(2026, 4, 18, 12, 3, tzinfo=timezone.utc)
+    cutoff_at = datetime(2026, 4, 17, 8, 0, tzinfo=timezone.utc)
+
+    scan_run_id = repo.start_scan_run(
+        include_paid=True,
+        selected_source_kinds=["feed"],
+        selected_source_ids=["feed-1"],
+        started_at=run_started_at,
+    )
+    scan_source_id = repo.record_scan_source(
+        scan_run_id,
+        source=source,
+        status="success",
+        started_at=source_started_at,
+        finished_at=source_finished_at,
+        cutoff_at=cutoff_at,
+        items_seen=2,
+        items_new=1,
+        items_existing=1,
+    )
+    repo.record_scan_item(
+        scan_source_id,
+        NormalizedItem(
+            item_id="11111111-1111-4111-8111-111111111111",
+            source_id="feed-1",
+            item_type="feed",
+            external_id="post-1",
+            canonical_url="https://example.com/post-1",
+            title="Brand New",
+            author="Author",
+            published_at=datetime(2026, 4, 18, 11, 0, tzinfo=timezone.utc),
+            excerpt="One",
+            content_text="One",
+        ),
+        result="new",
+    )
+    repo.record_scan_item(
+        scan_source_id,
+        NormalizedItem(
+            item_id="22222222-2222-4222-8222-222222222222",
+            source_id="feed-1",
+            item_type="feed",
+            external_id="post-2",
+            canonical_url="https://example.com/post-2",
+            title="Already Seen",
+            author="Author",
+            published_at=datetime(2026, 4, 18, 10, 0, tzinfo=timezone.utc),
+            excerpt="Two",
+            content_text="Two",
+            content_status="missing",
+            content_source="rss",
+        ),
+        result="existing",
+    )
+    repo.finish_scan_run(
+        scan_run_id,
+        status="success",
+        sources_considered=1,
+        sources_scanned=1,
+        sources_skipped=0,
+        sources_failed=0,
+        items_seen=2,
+        items_new=1,
+        items_existing=1,
+        finished_at=run_finished_at,
+    )
+
+    runs = repo.list_scan_runs(limit=10)
+    assert len(runs) == 1
+    assert runs[0].scan_run_id == scan_run_id
+    assert runs[0].status == "success"
+    assert runs[0].include_paid is True
+    assert runs[0].selected_source_kinds == ["feed"]
+    assert runs[0].selected_source_ids == ["feed-1"]
+    assert runs[0].items_existing == 1
+
+    detail = repo.get_scan_run(scan_run_id)
+
+    assert detail is not None
+    assert detail.run.started_at == run_started_at
+    assert detail.run.finished_at == run_finished_at
+    assert len(detail.sources) == 1
+    assert detail.sources[0].source_id == "feed-1"
+    assert detail.sources[0].cutoff_at == cutoff_at
+    assert detail.sources[0].items_new == 1
+    assert detail.sources[0].items_existing == 1
+    assert len(detail.items) == 2
+    assert [item.result for item in detail.items] == ["new", "existing"]
+    assert detail.items[1].content_status.value == "missing"
+
+
+def test_scan_history_persists_skipped_and_failed_sources(tmp_path: Path) -> None:
+    repo = Repository(tmp_path / "laminar.db")
+    skipped = SourceConfig(id="x-1", kind="x", name="Example X", costs_money=True)
+    failed = SourceConfig(id="feed-1", kind="feed", name="Broken Feed")
+    repo.upsert_source(skipped)
+    repo.upsert_source(failed)
+
+    scan_run_id = repo.start_scan_run(
+        include_paid=False,
+        selected_source_kinds=["feed", "x"],
+        selected_source_ids=[],
+    )
+    repo.record_scan_source(
+        scan_run_id,
+        source=skipped,
+        status="skipped",
+        skip_reason="paid_not_included",
+        items_seen=0,
+        items_new=0,
+        items_existing=0,
+    )
+    repo.record_scan_source(
+        scan_run_id,
+        source=failed,
+        status="failed",
+        items_seen=0,
+        items_new=0,
+        items_existing=0,
+        error="HTTP Error 404: Not Found",
+    )
+    repo.finish_scan_run(
+        scan_run_id,
+        status="partial_failure",
+        sources_considered=2,
+        sources_scanned=1,
+        sources_skipped=1,
+        sources_failed=1,
+        items_seen=0,
+        items_new=0,
+        items_existing=0,
+    )
+
+    detail = repo.get_scan_run(scan_run_id)
+
+    assert detail is not None
+    assert detail.run.status == "partial_failure"
+    assert [source.status for source in detail.sources] == ["skipped", "failed"]
+    assert detail.sources[0].skip_reason == "paid_not_included"
+    assert detail.sources[1].error == "HTTP Error 404: Not Found"
 
 
 def test_dedupes_by_canonical_url(tmp_path: Path) -> None:

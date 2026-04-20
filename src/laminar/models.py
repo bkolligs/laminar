@@ -66,9 +66,11 @@ class StoredItem:
     item_id: str
     source_id: str
     item_type: str
+    external_id: str | None
     title: str
     canonical_url: str | None
     published_at: datetime | None
+    retrieved_at: datetime
     author: str | None
     excerpt: str | None
     content_text: str | None
@@ -104,3 +106,63 @@ class RepositoryStats:
     total_size_bytes: int
     sources: list[SourceStats]
     kinds: list[SourceKindStats]
+
+
+@dataclass(slots=True)
+class ScanRunSummary:
+    scan_run_id: int
+    started_at: datetime
+    finished_at: datetime | None
+    status: str
+    include_paid: bool
+    selected_source_kinds: list[str]
+    selected_source_ids: list[str]
+    sources_considered: int
+    sources_scanned: int
+    sources_skipped: int
+    sources_failed: int
+    items_seen: int
+    items_new: int
+    items_existing: int
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class ScanSourceHistory:
+    scan_source_id: int
+    scan_run_id: int
+    source_id: str
+    source_kind: str
+    source_name: str
+    status: str
+    skip_reason: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    cutoff_at: datetime | None
+    items_seen: int
+    items_new: int
+    items_existing: int
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class ScanItemHistory:
+    scan_item_id: int
+    scan_source_id: int
+    source_id: str
+    item_id: str | None
+    external_id: str | None
+    canonical_url: str | None
+    title: str
+    published_at: datetime | None
+    result: str
+    content_status: ContentStatus
+    content_source: str | None
+    failure_reason: str | None = None
+
+
+@dataclass(slots=True)
+class ScanRunDetail:
+    run: ScanRunSummary
+    sources: list[ScanSourceHistory]
+    items: list[ScanItemHistory]

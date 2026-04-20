@@ -24,6 +24,7 @@ class Adapter(Protocol):
         *,
         since: datetime | None = None,
         verbose: Callable[[str], None] | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]: ...
 
 
@@ -34,6 +35,7 @@ class FeedAdapter:
         *,
         since: datetime | None = None,
         verbose: Callable[[str], None] | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]:
         xml_text = fetch_text(source.feed_url or "")
         root = ElementTree.fromstring(xml_text)
@@ -132,6 +134,7 @@ class YouTubeAdapter:
         *,
         since: datetime | None = None,
         verbose: Callable[[str], None] | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]:
         uploads_playlist_id = _youtube_uploads_playlist_id(source)
         if uploads_playlist_id is not None:
@@ -140,8 +143,9 @@ class YouTubeAdapter:
                 uploads_playlist_id,
                 since=since,
                 verbose=verbose,
+                progress=progress,
             )
-        return self._scan_feed(source, since=since, verbose=verbose)
+        return self._scan_feed(source, since=since, verbose=verbose, progress=progress)
 
     def _scan_api(
         self,
@@ -150,6 +154,7 @@ class YouTubeAdapter:
         *,
         since: datetime | None = None,
         verbose: Callable[[str], None] | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]:
         items: list[NormalizedItem] = []
         num_items = _youtube_num_items(source)
@@ -164,10 +169,15 @@ class YouTubeAdapter:
                     f"{source.id}: stopping youtube scan at {_display_dt(upload.published_at)} because it is at or before cutoff {_display_dt(since)}",
                 )
                 break
+            _progress_log(
+                progress,
+                f"{source.id}: discovered {upload.title} ({upload.video_id})",
+            )
             transcript_payload = _fetch_transcript_payload(
                 source,
                 upload.video_id,
                 verbose=verbose,
+                progress=progress,
             )
             items.append(
                 NormalizedItem(
@@ -211,6 +221,7 @@ class YouTubeAdapter:
         *,
         since: datetime | None = None,
         verbose: Callable[[str], None] | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]:
         xml_text = fetch_text(source.feed_url or "")
         root = ElementTree.fromstring(xml_text)
@@ -237,10 +248,16 @@ class YouTubeAdapter:
             video_id = _find_text(entry, "./yt:videoId", ns) or extract_video_id(
                 video_url
             )
+            title = _find_text(entry, "./atom:title", ns) or "(untitled video)"
+            _progress_log(
+                progress,
+                f"{source.id}: discovered {title} ({video_id or 'unknown video'})",
+            )
             transcript_payload = _fetch_transcript_payload(
                 source,
                 video_id,
                 verbose=verbose,
+                progress=progress,
             )
             items.append(
                 NormalizedItem(
@@ -248,7 +265,7 @@ class YouTubeAdapter:
                     item_type="video",
                     external_id=video_id,
                     canonical_url=video_url,
-                    title=_find_text(entry, "./atom:title", ns) or "(untitled video)",
+                    title=title,
                     author=_find_text(entry, "./atom:author/atom:name", ns)
                     or channel_title,
                     published_at=published_at,
@@ -313,6 +330,7 @@ def _fetch_transcript_payload(
     video_id: str | None,
     *,
     verbose: Callable[[str], None] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "content_text": None,
@@ -348,11 +366,19 @@ def _fetch_transcript_payload(
             verbose,
             f"{source.id}: transcript available for {video_id} in {transcript.language_code or 'unknown language'} via {transcript.source or 'unknown source'}",
         )
+        _progress_log(
+            progress,
+            f"{source.id}: transcript found for {video_id}",
+        )
     except TranscriptUnavailable as exc:
         payload["content_status"] = exc.content_status
         _verbose_log(
             verbose,
             f"{source.id}: transcript {exc.content_status.value} for {video_id}",
+        )
+        _progress_log(
+            progress,
+            f"{source.id}: {_transcript_status_message(exc.content_status)} for {video_id}",
         )
 
     return payload
@@ -365,6 +391,7 @@ class XAdapter:
         *,
         since: datetime | None = None,
         verbose: Callable[[str], None] | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> list[NormalizedItem]:
         payload = _run_x_command(source, verbose=verbose)
         data = json.loads(payload)
@@ -641,6 +668,24 @@ def _verbose_log(
 ) -> None:
     if verbose is not None:
         verbose(message)
+
+
+def _progress_log(
+    progress: Callable[[str], None] | None,
+    message: str,
+) -> None:
+    if progress is not None:
+        progress(message)
+
+
+def _transcript_status_message(status: ContentStatus) -> str:
+    if status == ContentStatus.MISSING:
+        return "transcript missing"
+    if status == ContentStatus.RATE_LIMITED:
+        return "transcript rate-limited"
+    if status == ContentStatus.FETCH_FAILED:
+        return "transcript fetch failed"
+    return f"transcript {status.value}"
 
 
 def _display_dt(value: datetime | None) -> str:
