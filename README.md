@@ -57,7 +57,7 @@ uv run laminar stats
 
 YouTube sources now use the official YouTube Data API instead of the public XML feed. Set `YOUTUBE_API_KEY` in your environment before adding or scanning YouTube sources. Watch URLs, `/channel/...`, `@handle`, `/user/...`, and legacy `feeds/videos.xml?channel_id=...` URLs are accepted. By default Laminar fetches the latest 5 videos per YouTube scan; override that with `--num-items` when adding the source. During scans, Laminar fetches YouTube uploads one at a time, attempts the transcript immediately, and stops advancing to older videos after the first transcript failure. It also reports transcript failures inline and distinguishes missing transcripts from rate limits and other fetch failures in stored item metadata.
 
-X sources are treated as paid by default, including when the type is inferred from an X URL. Use `--paid` for any other source backed by a paid or metered API. Paid sources are skipped by default during `scan`; pass `--include-paid` when you want to scan them.
+X sources are treated as paid by default, including when the type is inferred from an X URL. Use `--paid` for any other source backed by a paid API. Paid sources are skipped by default during `scan`; pass `--include-paid` when you want to scan them.
 
 For X sources, Laminar resolves the source URL through `xurl` automatically. X list browser URLs like `https://x.com/i/lists/...` are detected automatically and translated into the corresponding list-tweets API request before invoking `xurl`; other X URLs are treated as user sources.
 

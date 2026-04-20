@@ -64,8 +64,8 @@ uv run laminar items import items.yaml
 - `laminar items export/import` round-trip stored items through YAML.
 - YouTube items should include transcript text when captions are available.
 - X ingestion currently assumes `xurl` or another configured command returns JSON in the expected shape.
-- X sources are treated as paid/metered by default, including legacy rows loaded from SQLite.
-- Sources can also be explicitly marked as paid via `--costs-money`.
+- X sources are treated as paid by default, including legacy rows loaded from SQLite.
+- Sources can also be explicitly marked as paid via `--paid`.
 - Dedupe is based on canonical URL first, then `(source_id, external_id)`.
 - Search is text-based over title, excerpt, and stored content text.
 - `laminar scan` skips paid sources by default unless `--include-paid` is passed.

@@ -34,7 +34,7 @@ class SourceConfig:
     kind: str
     name: str
     enabled: bool = True
-    costs_money: bool = False
+    paid: bool = False
     feed_url: str | None = None
     handle: str | None = None
     transcript_languages: list[str] = field(default_factory=list)
@@ -86,7 +86,7 @@ class SourceStats:
     name: str
     kind: str
     enabled: bool
-    costs_money: bool
+    paid: bool
     item_count: int
     size_bytes: int
 

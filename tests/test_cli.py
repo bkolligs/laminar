@@ -199,7 +199,7 @@ def test_scan_and_query(tmp_path: Path) -> None:
     assert "market update" in shown["content_text"]
     assert shown["content_source"] == "youtube_transcript_api_manual"
     assert shown["raw_payload"]["transcript_segments"][0]["timestamp"] == "0:00"
-    assert any(source.costs_money for source in repo.list_sources() if source.kind == "x")
+    assert any(source.paid for source in repo.list_sources() if source.kind == "x")
 
     source_id = next(
         source.id for source in repo.list_sources() if source.name == "Example Channel"
@@ -288,7 +288,7 @@ def test_scan_continues_after_source_failure_and_reports_item_statuses(
         id="good-source",
         kind="x",
         name="Healthy Feed",
-        costs_money=True,
+        paid=True,
         handle="healthy",
         feed_url="https://x.com/healthy",
     )
@@ -374,7 +374,7 @@ def test_scan_continues_after_source_failure_and_reports_item_statuses(
     assert "Scanning bad-source (Broken Feed)" in output
     assert "bad-source: unreachable - HTTP Error 404: Not Found" in output
     assert "Scanning good-source (Healthy Feed)" in output
-    assert "good-source: this source uses a paid or metered integration" in output
+    assert "good-source: this source is marked paid" in output
     assert "good-source: reachable" in output
     assert "good-source: existing Already seen" in output
     assert "good-source: new Brand new" in output
@@ -406,7 +406,7 @@ def test_scan_skips_paid_sources_without_include_paid(tmp_path: Path) -> None:
             id="paid-source",
             kind="x",
             name="Paid X",
-            costs_money=True,
+            paid=True,
             handle="example",
             feed_url="https://x.com/example",
         )
@@ -1153,7 +1153,7 @@ def test_scan_can_filter_by_source_kind(tmp_path: Path) -> None:
         id="x-source",
         kind="x",
         name="Example X",
-        costs_money=True,
+        paid=True,
         handle="example",
         feed_url="https://x.com/example",
     )
@@ -1411,7 +1411,7 @@ def test_x_sources_default_to_paid(tmp_path: Path) -> None:
 
     assert len(sources) == 1
     assert sources[0].kind == "x"
-    assert sources[0].costs_money is True
+    assert sources[0].paid is True
 
 
 def test_x_profile_urls_infer_handle(tmp_path: Path) -> None:
@@ -1582,7 +1582,7 @@ def test_explicit_type_overrides_url_inference(tmp_path: Path) -> None:
     sources = Repository(db_path).list_sources()
     assert len(sources) == 1
     assert sources[0].kind == "feed"
-    assert sources[0].costs_money is False
+    assert sources[0].paid is False
     assert sources[0].handle is None
 
 
@@ -1682,7 +1682,6 @@ def test_source_add_help_uses_url_type_and_paid_flags(capsys) -> None:
     assert "--kind" not in help_text
     assert "--feed-url" not in help_text
     assert "--command" not in help_text
-    assert "--costs-money" not in help_text
     assert "--handle" not in help_text
 
 
@@ -2011,7 +2010,7 @@ def test_source_export_and_import_round_trip_yaml(tmp_path: Path) -> None:
             kind="youtube",
             name="Example Channel",
             enabled=False,
-            costs_money=True,
+            paid=True,
             feed_url="https://www.youtube.com/watch?v=abc123",
             handle="@example",
             transcript_languages=["en", "es"],
@@ -2035,7 +2034,7 @@ def test_source_export_and_import_round_trip_yaml(tmp_path: Path) -> None:
     assert imported is not None
     assert imported.name == "Example Channel"
     assert imported.enabled is False
-    assert imported.costs_money is True
+    assert imported.paid is True
     assert imported.transcript_languages == ["en", "es"]
     assert imported.metadata == {"channel_id": "UC123", "num_items": 7}
     assert imported.last_successful_scan_at == scanned_at

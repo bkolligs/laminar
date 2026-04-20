@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
@@ -16,7 +17,7 @@ def test_persists_source_config_round_trip(tmp_path: Path) -> None:
             kind="youtube",
             name="Example Channel",
             enabled=False,
-            costs_money=True,
+            paid=True,
             feed_url="https://www.youtube.com/feeds/videos.xml?channel_id=123",
             transcript_languages=["en", "es"],
             metadata={"region": "us"},
@@ -28,7 +29,7 @@ def test_persists_source_config_round_trip(tmp_path: Path) -> None:
     assert len(sources) == 1
     assert sources[0].id == "yt-1"
     assert sources[0].enabled is False
-    assert sources[0].costs_money is True
+    assert sources[0].paid is True
     assert sources[0].transcript_languages == ["en", "es"]
     assert sources[0].metadata["region"] == "us"
 
@@ -52,7 +53,7 @@ def test_get_source_returns_full_source_details(tmp_path: Path) -> None:
             kind="youtube",
             name="Example Channel",
             enabled=False,
-            costs_money=True,
+            paid=True,
             feed_url="https://www.youtube.com/feeds/videos.xml?channel_id=123",
             handle="@example",
             transcript_languages=["en", "es"],
@@ -67,7 +68,7 @@ def test_get_source_returns_full_source_details(tmp_path: Path) -> None:
     assert source.id == "yt-1"
     assert source.name == "Example Channel"
     assert source.enabled is False
-    assert source.costs_money is True
+    assert source.paid is True
     assert source.feed_url == "https://www.youtube.com/feeds/videos.xml?channel_id=123"
     assert source.handle == "@example"
     assert source.transcript_languages == ["en", "es"]
@@ -84,7 +85,7 @@ def test_stats_reports_totals_by_source_and_kind(tmp_path: Path) -> None:
             id="x-1",
             kind="x",
             name="Example X",
-            costs_money=True,
+            paid=True,
             enabled=False,
         )
     )
@@ -195,7 +196,7 @@ def test_stats_include_items_without_matching_source(tmp_path: Path) -> None:
     assert sources_by_id["missing-source"].name == "[missing source]"
     assert sources_by_id["missing-source"].kind == "missing"
     assert sources_by_id["missing-source"].enabled is False
-    assert sources_by_id["missing-source"].costs_money is False
+    assert sources_by_id["missing-source"].paid is False
     assert sources_by_id["missing-source"].item_count == 1
     assert sources_by_id["missing-source"].size_bytes > 0
     assert kinds_by_name["missing"].source_count == 1
@@ -392,7 +393,7 @@ def test_scan_history_records_run_source_and_item_details(tmp_path: Path) -> Non
 
 def test_scan_history_persists_skipped_and_failed_sources(tmp_path: Path) -> None:
     repo = Repository(tmp_path / "laminar.db")
-    skipped = SourceConfig(id="x-1", kind="x", name="Example X", costs_money=True)
+    skipped = SourceConfig(id="x-1", kind="x", name="Example X", paid=True)
     failed = SourceConfig(id="feed-1", kind="feed", name="Broken Feed")
     repo.upsert_source(skipped)
     repo.upsert_source(failed)

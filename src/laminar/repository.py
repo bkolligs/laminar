@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS sources (
     kind TEXT NOT NULL,
     name TEXT NOT NULL,
     enabled INTEGER NOT NULL,
-    costs_money INTEGER NOT NULL DEFAULT 0,
+    paid INTEGER NOT NULL DEFAULT 0,
     feed_url TEXT,
     handle TEXT,
     transcript_languages_json TEXT NOT NULL DEFAULT '[]',
@@ -174,7 +174,7 @@ class Repository:
             conn.execute(
                 """
                 INSERT INTO sources (
-                    source_id, kind, name, enabled, costs_money, feed_url, handle,
+                    source_id, kind, name, enabled, paid, feed_url, handle,
                     transcript_languages_json, metadata_json,
                     last_successful_scan_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -182,7 +182,7 @@ class Repository:
                     kind = excluded.kind,
                     name = excluded.name,
                     enabled = excluded.enabled,
-                    costs_money = excluded.costs_money,
+                    paid = excluded.paid,
                     feed_url = excluded.feed_url,
                     handle = excluded.handle,
                     transcript_languages_json = excluded.transcript_languages_json,
@@ -194,7 +194,7 @@ class Repository:
                     source.kind,
                     source.name,
                     int(source.enabled),
-                    int(source.costs_money),
+                    int(source.paid),
                     source.feed_url,
                     source.handle,
                     json.dumps(source.transcript_languages),
@@ -212,7 +212,7 @@ class Repository:
                     kind,
                     name,
                     enabled,
-                    costs_money,
+                    paid,
                     feed_url,
                     handle,
                     transcript_languages_json,
@@ -233,7 +233,7 @@ class Repository:
                     kind,
                     name,
                     enabled,
-                    costs_money,
+                    paid,
                     feed_url,
                     handle,
                     transcript_languages_json,
@@ -895,7 +895,7 @@ class Repository:
                     s.name,
                     s.kind,
                     s.enabled,
-                    s.costs_money,
+                    s.paid,
                     COALESCE(sis.item_count, 0) AS item_count,
                     COALESCE(sis.size_bytes, 0) AS size_bytes
                 FROM sources s
@@ -906,7 +906,7 @@ class Repository:
                     '[missing source]' AS name,
                     'missing' AS kind,
                     0 AS enabled,
-                    0 AS costs_money,
+                    0 AS paid,
                     sis.item_count,
                     sis.size_bytes
                 FROM source_item_stats sis
@@ -993,7 +993,7 @@ class Repository:
                     name=str(row["name"]),
                     kind=str(row["kind"]),
                     enabled=bool(row["enabled"]),
-                    costs_money=bool(row["costs_money"]),
+                    paid=bool(row["paid"]),
                     item_count=int(row["item_count"]),
                     size_bytes=int(row["size_bytes"]),
                 )
@@ -1086,7 +1086,7 @@ def _row_to_source(row: sqlite3.Row) -> SourceConfig:
         kind=kind,
         name=row["name"],
         enabled=bool(row["enabled"]),
-        costs_money=bool(row["costs_money"]),
+        paid=bool(row["paid"]),
         feed_url=row["feed_url"],
         handle=row["handle"],
         transcript_languages=_json_list(row["transcript_languages_json"]),

@@ -26,7 +26,7 @@ Use `laminar source add --name <NAME> URL` as the normal way to create sources.
 - `--type` accepts `feed`, `youtube`, or `x`. If omitted, Laminar infers X URLs as `x`, YouTube feed URLs as `youtube`, and everything else as a feed source.
 - The source URL is positional. Do not rewrite it into a named flag.
 - For YouTube, use repeatable `--transcript-language` flags when transcript preference matters.
-- X sources are treated as paid by default, including inferred X URLs. Other metered sources should be marked with `--paid`.
+- X sources are treated as paid by default, including inferred X URLs. Other paid sources should be marked with `--paid`.
 - Use `--disable` to save a source without scanning it yet.
 - Use repeatable `--metadata KEY=VALUE` to preserve extra source metadata.
 

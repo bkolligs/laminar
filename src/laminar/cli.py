@@ -112,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_source.add_argument(
         "--paid",
         action="store_true",
-        help="Mark this source as using a paid or metered integration. X sources are paid by default.",
+        help="Mark this source as paid. X sources are paid by default.",
     )
     add_source.add_argument(
         "--disable",
@@ -142,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-i",
         "--include-paid",
         action="store_true",
-        help="Include sources marked as paid or metered.",
+        help="Include sources marked as paid.",
     )
     scan_parser.add_argument(
         "-v",
@@ -267,7 +267,7 @@ def _run_source(args: argparse.Namespace) -> int:
             "kind": source.kind,
             "name": source.name,
             "enabled": source.enabled,
-            "costs_money": source.costs_money,
+            "paid": source.paid,
             "feed_url": source.feed_url,
             "handle": source.handle,
             "transcript_languages": source.transcript_languages,
@@ -332,7 +332,7 @@ def _run_source(args: argparse.Namespace) -> int:
             source.id,
             source.kind,
             "enabled" if source.enabled else "disabled",
-            "paid" if source.costs_money else "free",
+            "paid" if source.paid else "free",
             source.name,
         )
     _console().print(table)
@@ -378,7 +378,7 @@ def _run_scan(args: argparse.Namespace) -> int:
         f"scan configuration: {len(active_sources)} active sources, include_paid={args.include_paid}, selected_kinds={sorted(selected_kinds) or ['all']}, selected_ids={sorted(selected) or ['all']}"
     )
     for source in active_sources:
-        if source.costs_money and not args.include_paid:
+        if source.paid and not args.include_paid:
             skipped_at = datetime.now(timezone.utc)
             repo.record_scan_source(
                 run_id,
@@ -400,9 +400,9 @@ def _run_scan(args: argparse.Namespace) -> int:
             continue
         scan_started_at = datetime.now(timezone.utc)
         console.print(f"Scanning {source.id} ({source.name})")
-        if source.costs_money:
+        if source.paid:
             console.print(
-                f"{source.id}: this source uses a paid or metered integration",
+                f"{source.id}: this source is marked paid",
                 style="yellow",
             )
         try:
@@ -756,7 +756,7 @@ def _run_stats(args: argparse.Namespace) -> int:
             source.name,
             source.kind,
             "enabled" if source.enabled else "disabled",
-            "paid" if source.costs_money else "free",
+            "paid" if source.paid else "free",
             str(source.item_count),
             _format_bytes(source.size_bytes),
         )
@@ -831,7 +831,7 @@ def _source_to_export_dict(source: SourceConfig) -> dict[str, object]:
         "kind": source.kind,
         "name": source.name,
         "enabled": source.enabled,
-        "costs_money": source.costs_money,
+        "paid": source.paid,
         "feed_url": source.feed_url,
         "handle": source.handle,
         "transcript_languages": list(source.transcript_languages),
@@ -870,7 +870,7 @@ def _parse_source_import_entry(entry: object, *, index: int) -> SourceConfig:
     kind = _require_non_empty_string(raw.get("kind"), field="kind", label=f"Source entry {index}")
     name = _require_non_empty_string(raw.get("name"), field="name", label=f"Source entry {index}")
     enabled = _coerce_bool(raw.get("enabled", True), field="enabled", label=f"Source entry {index}")
-    costs_money = _coerce_bool(raw.get("costs_money", False), field="costs_money", label=f"Source entry {index}")
+    paid = _coerce_bool(raw.get("paid", False), field="paid", label=f"Source entry {index}")
     feed_url = _coerce_optional_string(raw.get("feed_url"), field="feed_url", label=f"Source entry {index}")
     handle = _coerce_optional_string(raw.get("handle"), field="handle", label=f"Source entry {index}")
     transcript_languages = _coerce_string_list(
@@ -889,7 +889,7 @@ def _parse_source_import_entry(entry: object, *, index: int) -> SourceConfig:
         kind=kind,
         name=name,
         enabled=enabled,
-        costs_money=costs_money,
+        paid=paid,
         feed_url=feed_url,
         handle=handle,
         transcript_languages=transcript_languages,
@@ -1102,7 +1102,7 @@ def _build_source_from_args(args: argparse.Namespace) -> SourceConfig:
     feed_url = args.url
     kind = _resolve_source_kind(feed_url, args.kind)
     normalized_kind = kind
-    costs_money = args.paid or normalized_kind == "x"
+    paid = args.paid or normalized_kind == "x"
     transcript_languages = args.transcript_language
     if normalized_kind == "youtube" and not transcript_languages:
         transcript_languages = ["en"]
@@ -1116,7 +1116,7 @@ def _build_source_from_args(args: argparse.Namespace) -> SourceConfig:
         kind=normalized_kind,
         name=args.name,
         enabled=not args.disable,
-        costs_money=costs_money,
+        paid=paid,
         feed_url=feed_url,
         handle=_infer_x_handle(feed_url, normalized_kind),
         transcript_languages=transcript_languages,
